@@ -18,4 +18,5 @@ make_tokenize.sh
 merge.sh
 training.sh
 temp/
+hip/
 history_run_command.sh.log
