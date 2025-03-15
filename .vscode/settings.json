@@ -1,0 +1,5 @@
+{
+    "github.copilot.editor.enableAutoCompletions": false,
+    "chat.commandCenter.enabled": false,
+    "chat.experimental.statusIndicator.enabled": false
+}
