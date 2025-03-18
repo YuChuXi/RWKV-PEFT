@@ -16,7 +16,7 @@ from rwkvt.dataset.binidx import MMapIndexedDataset
 
 tokenizer = TRIE_TOKENIZER("tokenizer/rwkv_vocab_v20230424.txt")
 
-CTX = 8192
+CTX = 4096
 
 
 @dataclass()
@@ -61,6 +61,7 @@ class LOG_Processer:
         self.log_output = "data/message_cache"
 
         self.group_set: Dict[str, Message] = {}
+        self.image_set: Dict[str, int] = {}
 
         self.entries_pattern = re.compile(r"(\n\n<\|[^>]+?\|>: )")
         self.header_pattern = re.compile(r"<\|([^@]+?)@(\d+)(?:\(([^)]+)\))?\|>:")
@@ -128,7 +129,7 @@ class LOG_Processer:
     def parse_messages(self, text):
         entries = self.entries_pattern.split(text)
         messages = []
-        for i in tqdm.trange(1, len(entries), 2, leave=False, position=0):
+        for i in tqdm.trange(1, len(entries), 2, leave=False):
             header_str = entries[i].strip()
             content = entries[i + 1].lstrip("\n").rstrip("\n")
             match = self.header_pattern.match(header_str)
@@ -165,7 +166,7 @@ class LOG_Processer:
         message.content = [
             cqobj
             for cqobj in message.content
-            if (not isinstance(cqobj, CQObject)) or cqobj.type in self.cq_whitelist_2
+            if (not isinstance(cqobj, CQObject)) or (cqobj.type in self.cq_whitelist_2)
         ]
         if len(message.content) == 0:
             return None
@@ -173,7 +174,7 @@ class LOG_Processer:
 
     def message_to_text(self, message: Message) -> str:
         """將Message對象轉換為處理後的文本"""
-        parts = []
+        parts = [f"<|{message.username}@{message.qq}{f'({message.group})' if message.group != "" else ""}|>: "]
         for part in message.content:
             if isinstance(part, str):
                 parts.append(part.replace("\n", "\\n"))
@@ -186,9 +187,17 @@ class LOG_Processer:
                     parts.append(cq_str)
                 else:
                     parts.append(f"[CQ:{part.type}]")
-        return "".join(parts)
+                
+                if part.type in ["image"]:
+                    file = part.params.get("file", "")
+                    if file in self.image_set:
+                        self.image_set[file] += 1
+                    else:
+                        self.image_set[file] = 1
+                        
+        return "".join(parts) + "\n\n"
 
-    def process_group(self, group_name: str, messages: List[Message], n_tokens: int = 0) -> List[List[int]]:
+    def process_group(self, messages: List[Message], n_tokens: int = 0) -> List[List[int]]:
         """處理單個群組的消息並切片"""
         slices = []
         current_tokens = []
@@ -209,32 +218,15 @@ class LOG_Processer:
             while len(current_tokens) >= CTX:
                 slice_tokens = current_tokens[:CTX]
                 slices.append(slice_tokens)
-                current_tokens = current_tokens[CTX:]
+                current_tokens = []
         
         return slices
-
-    def shuffle_and_export(self, all_slices: Set[List[int]], output_path: str):
-        """混洗数据并导出为binidx格式"""
-        # 使用集合进行初步去重和混洗
-        
-        # 创建数据集构建器
-        builder = MMapIndexedDatasetBuilder(output_path, dtype=numpy.uint16)
-        
-        # 添加所有切片
-        for tokens in tqdm.tqdm(all_slices, desc="Exporting"):
-            print(len(tokens))
-            builder.add_item(numpy.array(tokens, dtype=numpy.uint16))
-            
-        # 添加特殊结束标记
-        builder.end_document()
-        builder.finalize()
 
     def convert_all(self):
         os.makedirs(self.obj_folder, exist_ok=True)
         
         # 流式处理并立即写入
-        output_path = self.log_output
-        builder = MMapIndexedDatasetBuilder(output_path, dtype=numpy.uint16)
+        builder = MMapIndexedDatasetBuilder(self.log_output+".bin", dtype=numpy.uint16)
         
         # 使用生成器管道处理数据
         def process_pipeline():
@@ -243,10 +235,10 @@ class LOG_Processer:
                 for future in concurrent.futures.as_completed(
                     [executor.submit(self.load_obj, f) for f in file_list]
                 ):
-                    group_name, messages = future.result()
+                    messages = future.result()
                     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as group_exec:
                         for slice_future in concurrent.futures.as_completed(
-                            [group_exec.submit(self.process_group, group_name, messages)]
+                            [group_exec.submit(self.process_group, messages)]
                         ):
                             yield from slice_future.result()
         
@@ -268,6 +260,23 @@ class LOG_Processer:
                 builder.add_item(numpy.array(item, dtype=numpy.uint16))
         
         builder.end_document()
-        builder.finalize()
+        builder.finalize(self.log_output+".idx")
+        print(f"{len(builder._sizes)}\n"*8) 
+        joblib.dump(self.image_set, "data/image_stat")
+        
 
 LOG_Processer().convert_all()
+
+# #预览数据集
+# #预览数据集
+# # 加载数据集
+# dataset = MMapIndexedDataset('data/message_cache')
+# print(f'Total documents: {len(dataset)}')
+
+# # 解码前5条样本
+# for i in range(5):
+#     tokens = dataset[i].astype(int)
+#     print(f'\nSample {i+1}:')
+#     print('Token IDs:', tokens)
+#     print('Decoded text:', tokenizer.decode(tokens.tolist()))
+#     print('Token IDs:', tokens)
