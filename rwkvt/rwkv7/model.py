@@ -9,13 +9,15 @@ from torch.nn import functional as F
 import deepspeed
 from rwkvt.infctx_module import BlockStateList
 from .block import Block
+from .image_emb import EmbeddingAndIMGProj
 
 class RWKV7(nn.Module):
     def __init__(self, args):
         super().__init__()
         self.args = args
 
-        self.emb = nn.Embedding(args.vocab_size, args.n_embd)
+        # TODO 来自args
+        self.emb = EmbeddingAndIMGProj(args.vocab_size, args.n_embd, 768, 24, 65530)
 
         self.blocks = nn.ModuleList([Block(args, i) for i in range(args.n_layer)])
 
