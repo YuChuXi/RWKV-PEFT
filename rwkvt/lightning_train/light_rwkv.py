@@ -243,6 +243,21 @@ class RWKV(pl.LightningModule):
                 
                 loss = self.criterion(logits.view(-1, logits.size(-1)), targets.view(-1), reduction='none')
                 loss = torch.sum(loss * mask) / sum_mask
+            if args.data_type=='mix_img':
+                idx, targets, mask, imgs = batch
+
+                logits, x = self(idx, mask, imgs)
+
+                mask = mask.reshape(-1)
+                sum_mask = torch.sum(mask).item()
+                
+                loss = self.criterion(logits.view(-1, logits.size(-1)), targets.view(-1), reduction='none')
+                loss = torch.sum(loss * mask) / sum_mask
+
+                # 反算vit及计算loss
+                loss_vit, other_loss = self.model.emb.vit_reconstruction_loss(x, imgs)
+                loss = loss + loss_vit * 0.5 # FIXME
+
             elif args.loss_mask!='none' or args.data_type=='jsonl':
                 idx, targets, mask = batch
 

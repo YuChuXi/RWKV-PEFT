@@ -35,12 +35,12 @@ class RWKV7(nn.Module):
             return self.forward_infctx(*args, **kwargs)
         return self.forward_normal(*args, **kwargs)
 
-    def forward_normal(self, idx, attention_mask = None):
+    def forward_normal(self, idx, attention_mask = None, vit_features_list = None):
         args = self.args
         B, T = idx.size()
         assert T <= args.ctx_len, "Cannot forward, model ctx_len is exhausted."
 
-        x = self.emb(idx)
+        x = self.emb(idx, vit_features_list)
         v_first = torch.empty_like(x)
 
         for block in self.blocks:
@@ -52,10 +52,11 @@ class RWKV7(nn.Module):
             else:
                 x, v_first = block(x, v_first, attention_mask)
 
-        x = self.ln_out(x)
-        x = self.head(x)
+        # FIXME 可选
+        xo = self.ln_out(x)
+        x = self.head(xo)
 
-        return x
+        return x, xo
 
     def forward_infctx(self, idx,  last_shift_states: torch.Tensor,
             last_wkv_states: torch.Tensor, attention_mask = None):
