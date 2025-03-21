@@ -10,7 +10,6 @@ class ViTProj(nn.Module):
     ):
         super().__init__()
         self.n_vit_layer = n_vit_layer
-        self.norm_layers = nn.ModuleList()
 
         # 参数堆叠初始化
         self.w1 = nn.Parameter(torch.Tensor(n_vit_layer, n_vit_embd, hidden_dim))
@@ -18,30 +17,27 @@ class ViTProj(nn.Module):
         self.b1 = nn.Parameter(torch.Tensor(n_vit_layer, hidden_dim))
         self.b2 = nn.Parameter(torch.Tensor(n_vit_layer, n_llm_embd))
 
-        # 分组归一化参数
-        for _ in range(n_vit_layer):
-            self.norm_layers.append(nn.LayerNorm(hidden_dim, elementwise_affine=False))
-
         # 参数初始化
         nn.init.kaiming_normal_(self.w1, mode="fan_in", nonlinearity="linear")
         nn.init.kaiming_normal_(self.w2, mode="fan_in", nonlinearity="linear")
         nn.init.zeros_(self.b1)
         nn.init.zeros_(self.b2)
 
+        # 添加激活函数和分组标准化
+        self.act = nn.GELU()
+        self.gn1 = nn.GroupNorm(num_groups=n_vit_layer, num_channels=n_vit_layer)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         输入形状: (batch_size, n_vit_layer, n_vit_embd)
         输出形状: (batch_size, n_vit_layer, n_llm_embd)
         """
-        # 第一层投影
-        x = torch.einsum("ble,leh->blh", x, self.w1) + self.b1.unsqueeze(0)
-
-        # 分组归一化
         batch_size = x.size(0)
-        x = x.view(-1, self.n_vit_layer, x.size(-1))  # (batch, layer, hidden)
-        x = torch.stack(
-            [self.norm_layers[i](x[:, i]) for i in range(self.n_vit_layer)], dim=1
-        )
+
+        # 第一层投影 + 激活函数 + 分组标准化
+        x = torch.einsum("ble,leh->blh", x, self.w1) + self.b1.unsqueeze(0)
+        x = self.act(x)
+        x = self.gn1(x)  # 输入形状: (batch_size, n_vit_layer, hidden_dim)
 
         # 第二层投影
         x = torch.einsum("blh,lho->blo", x, self.w2) + self.b2.unsqueeze(0)
@@ -54,7 +50,6 @@ class ReViTProj(nn.Module):
     ):
         super().__init__()
         self.n_vit_layer = n_vit_layer
-        self.norm_layers = nn.ModuleList()
 
         # 参数堆叠初始化
         self.w1 = nn.Parameter(torch.Tensor(n_vit_layer, n_llm_embd, hidden_dim))
@@ -62,30 +57,27 @@ class ReViTProj(nn.Module):
         self.b1 = nn.Parameter(torch.Tensor(n_vit_layer, hidden_dim))
         self.b2 = nn.Parameter(torch.Tensor(n_vit_layer, n_vit_embd))
 
-        # 分组归一化参数
-        for _ in range(n_vit_layer):
-            self.norm_layers.append(nn.LayerNorm(hidden_dim, elementwise_affine=False))
-
         # 参数初始化
         nn.init.kaiming_normal_(self.w1, mode="fan_in", nonlinearity="linear")
         nn.init.kaiming_normal_(self.w2, mode="fan_in", nonlinearity="linear")
         nn.init.zeros_(self.b1)
         nn.init.zeros_(self.b2)
 
+        # 添加激活函数和分组标准化
+        self.act = nn.GELU()
+        self.gn1 = nn.GroupNorm(num_groups=n_vit_layer, num_channels=n_vit_layer)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         输入形状: (batch_size, n_vit_layer, n_llm_embd)
         输出形状: (batch_size, n_vit_layer, n_vit_embd)
         """
-        # 第一层反投影
-        x = torch.einsum("ble,leh->blh", x, self.w1) + self.b1.unsqueeze(0)
-
-        # 分组归一化
         batch_size = x.size(0)
-        x = x.view(-1, self.n_vit_layer, x.size(-1))  # (batch, layer, hidden)
-        x = torch.stack(
-            [self.norm_layers[i](x[:, i]) for i in range(self.n_vit_layer)], dim=1
-        )
+
+        # 第一层反投影 + 激活函数 + 分组标准化
+        x = torch.einsum("ble,leh->blh", x, self.w1) + self.b1.unsqueeze(0)
+        x = self.act(x)
+        x = self.gn1(x)  # 输入形状: (batch_size, n_vit_layer, hidden_dim)
 
         # 第二层反投影
         x = torch.einsum("blh,lho->blo", x, self.w2) + self.b2.unsqueeze(0)
@@ -122,7 +114,7 @@ class EmbeddingAndIMGProj(nn.Embedding):
         self.reverse_vit_proj = ReViTProj(
             n_vit_layer=n_vit_layer, n_llm_embd=embedding_dim, n_vit_embd=n_vit_embd
         )
-        
+
         self.register_buffer("last_indices", None)  # (batch_indices, token_indices)
 
         # 用于计算loss
