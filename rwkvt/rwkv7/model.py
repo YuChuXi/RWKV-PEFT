@@ -17,6 +17,7 @@ class RWKV7(nn.Module):
         self.args = args
 
         # TODO 来自args
+        # self.emb = nn.Embedding(args.vocab_size, args.n_embd)
         self.emb = EmbeddingAndIMGProj(args.vocab_size, args.n_embd, 768, 24, 65530)
 
         self.blocks = nn.ModuleList([Block(args, i) for i in range(args.n_layer)])

@@ -113,13 +113,16 @@ class EmbeddingAndIMGProj(nn.Embedding):
             **kwargs,
         )
 
-        self.embedding = nn.Embedding(
-            num_embeddings, embedding_dim, padding_idx=img_padding_idx
-        )
-        self.vit_proj = nn.Linear(n_vit_embd, embedding_dim)
-        self.reverse_vit_proj = nn.Linear(embedding_dim, n_vit_embd)
         self.n_vit_layer = n_vit_layer
         self.img_padding_idx = img_padding_idx
+
+        self.vit_proj = ViTProj(
+            n_vit_layer=n_vit_layer, n_vit_embd=n_vit_embd, n_llm_embd=embedding_dim
+        )
+        self.reverse_vit_proj = ReViTProj(
+            n_vit_layer=n_vit_layer, n_llm_embd=embedding_dim, n_vit_embd=n_vit_embd
+        )
+        
         self.register_buffer("last_indices", None)  # (batch_indices, token_indices)
 
         # 用于计算loss
@@ -132,7 +135,7 @@ class EmbeddingAndIMGProj(nn.Embedding):
         input_ids: torch.Tensor,
         vit_features_list: Optional[List[Dict[int, torch.Tensor]]] = None,
     ) -> torch.Tensor:
-        embeddings = self.embedding(input_ids)
+        embeddings = super().forward(input_ids)
 
         if vit_features_list is not None:
             batch_indices, token_indices, vit_features = [], [], []
@@ -287,113 +290,3 @@ class EmbeddingAndIMGProj(nn.Embedding):
             img_padding_idx=embeddings.padding_idx,
             _weight=embeddings.weight,
         )
-
-
-import torch
-import torch.nn as nn
-from typing import List, Dict, Optional
-
-
-class EmbeddingAndIMGProj(nn.Embedding):
-    def __init__(
-        self,
-        num_embeddings: int,
-        embedding_dim: int,
-        n_vit_embd: int,
-        n_vit_layer: int,
-        img_padding_idx: int,
-        **kwargs,
-    ):
-        # 继承父类初始化
-        super().__init__(
-            num_embeddings=num_embeddings,
-            embedding_dim=embedding_dim,
-            padding_idx=img_padding_idx,
-            **kwargs,
-        )
-
-        # 验证维度匹配
-        assert (
-            embedding_dim == self.embedding_dim
-        ), f"Dimension mismatch ({embedding_dim} vs {self.embedding_dim})"
-
-        # 视觉特征处理模块
-        self.vit_proj = ViTProj(
-            n_vit_layer=n_vit_layer, n_vit_embd=n_vit_embd, n_llm_embd=embedding_dim
-        )
-        self.re_vit_proj = ReViTProj(
-            n_vit_layer=n_vit_layer, n_llm_embd=embedding_dim, n_vit_embd=n_vit_embd
-        )
-
-        # 注册缓冲区保存索引
-        self.register_buffer("last_indices", None)  # (batch_indices, token_indices)
-        self.n_vit_layer = n_vit_layer
-        self.img_padding_idx = img_padding_idx
-
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        vit_features_list: Optional[List[Dict[int, torch.Tensor]]] = None,
-    ) -> torch.Tensor:
-        # 基础嵌入计算
-        embeddings = super().forward(input_ids)
-
-        # 视觉特征插入处理
-        if vit_features_list is not None:
-            batch_indices, token_indices, vit_feats = [], [], []
-
-            for batch_idx, sample_dict in enumerate(vit_features_list):
-                for start_idx, feat in sample_dict.items():
-                    # 动态计算有效插入长度
-                    max_len = input_ids.shape[1]
-                    valid_layers = min(self.n_vit_layer, max_len - start_idx)
-
-                    if valid_layers <= 0:
-                        continue
-
-                    # 特征切片处理
-                    assert feat.shape == (
-                        self.n_vit_layer,
-                        self.vit_proj.n_vit_embd,
-                    ), f"ViT feature shape error: expected ({self.n_vit_layer}, {self.vit_proj.n_vit_embd}), got {feat.shape}"
-                    feat_slice = feat[:valid_layers]
-
-                    # 验证padding位置
-                    padding_check = input_ids[
-                        batch_idx, start_idx : start_idx + valid_layers
-                    ]
-                    assert torch.all(
-                        padding_check == self.img_padding_idx
-                    ), "Insert positions must be IMG_PADDING"
-
-                    # 生成索引
-                    batch_indices.extend([batch_idx] * valid_layers)
-                    token_indices.extend(range(start_idx, start_idx + valid_layers))
-                    vit_feats.append(feat_slice)
-
-            if vit_feats:
-                # 堆叠特征并进行投影
-                vit_tensor = torch.cat(vit_feats, dim=0)
-                projected = self.vit_proj(vit_tensor.unsqueeze(0))[0]  # (N, D)
-
-                # 创建索引张量
-                batch_tensor = torch.tensor(batch_indices, device=input_ids.device)
-                token_tensor = torch.tensor(token_indices, device=input_ids.device)
-
-                # 高效索引更新
-                embeddings[batch_tensor, token_tensor] = projected
-                self.last_indices = (batch_tensor, token_tensor)
-
-        return embeddings
-
-    def decode_vit_features(self, outputs: torch.Tensor) -> torch.Tensor:
-        assert self.last_indices is not None, "Run forward with vit features first"
-        batch_indices, token_indices = self.last_indices
-
-        # 考虑自回归模型的输出位移
-        shifted_tokens = torch.clamp(token_indices - 1, min=0)
-
-        # 提取并反投影特征
-        vit_outputs = outputs[batch_indices, shifted_tokens]  # (N, D)
-        vit_recon = self.re_vit_proj(vit_outputs.unsqueeze(1))[:, 0]  # (N, vit_dim)
-        return vit_recon.view(-1, self.n_vit_layer, vit_recon.shape[-1])
