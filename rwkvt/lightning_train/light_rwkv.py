@@ -87,7 +87,7 @@ class RWKV(pl.LightningModule):
             self.criterion = FusedCrossEntropyLoss(inplace_backward=True)
         else:
             FusedCrossEntropyLoss = None
-            if args.loss_mask!='none' or args.data_type=='jsonl' or args.data_type=='sft':
+            if args.loss_mask!='none' or args.data_typein ['jsonl', 'sft', 'mix_img']:
                 self.criterion = nn.CrossEntropyLoss(reduction='none')
             else:
                 self.criterion = nn.CrossEntropyLoss()
@@ -243,7 +243,7 @@ class RWKV(pl.LightningModule):
                 
                 loss = self.criterion(logits.view(-1, logits.size(-1)), targets.view(-1), reduction='none')
                 loss = torch.sum(loss * mask) / sum_mask
-            if args.data_type=='mix_img':
+            if args.data_type=='mix_img': # 肯定有loss mask
                 idx, targets, mask, imgs = batch
 
                 logits, x = self(idx, mask, imgs)

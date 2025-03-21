@@ -102,7 +102,7 @@ class MyDataset(Dataset):
             with jsonlines.open(args.data_file) as file:
                 self.data = list(file)
 
-        elif args.data_type == "binidx":
+        elif args.data_type in ["binidx", "mix_img"]:
             if args.my_pile_version == 1:
                 self.data = MMapIndexedDataset(args.data_file)
                 self.data_size = len(self.data._bin_buffer) // self.data._index._dtype_size
@@ -138,6 +138,14 @@ class MyDataset(Dataset):
                     assert MaybeIsPrime(args.magic_prime)
                     assert args.magic_prime % 3 == 2
                     assert args.magic_prime / dataset_slot > 0.99 and args.magic_prime / dataset_slot <= 1
+
+            if args.data_type == "mix_img":
+                import h5py
+                import numpy as np
+                with open(args.data_file + "img.ids", 'r') as f:
+                    self.image_names = {idx: line.strip() for idx, line in enumerate(f)}
+                self.image_features = h5py.File(args.data_file + "img.h5", 'r')
+
         elif args.data_type == "numpy":
             self.data = np.load(args.data_file).astype("int")
             self.vocab_size = args.vocab_size
@@ -268,7 +276,7 @@ class MyDataset(Dataset):
                 # cheat: pick a random spot in dataset
                 i = np.random.randint(0, self.data_size - req_len)
 
-            if args.data_type == "binidx":
+            if args.data_type in ["binidx", "mix_img"]:
                 if args.my_pile_version == 1:
                     if args.dataload == 'pad':
                         dix, min_len = data.pad(idx=idx, length=req_len)
@@ -338,6 +346,10 @@ class MyDataset(Dataset):
                 t2 = pipeline.encode(args.mask_id['mask1'])
                 mask = self.generate_mask(dix, t1, t2, min_len)
                 return x, y, mask
+            
+            if args.data_type == "mix_img"：
+                pass
+                # TODO
 
             return x, y
 
