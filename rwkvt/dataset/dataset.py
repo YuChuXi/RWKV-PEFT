@@ -169,7 +169,7 @@ class MyDataset(Dataset):
             if args.data_type == "mix_img":
                 import h5py
                 import numpy as np
-                self.image_features = h5py.File(args.data_file + "img.h5", 'r')
+                self.image_features = h5py.File(args.data_file + ".img.h5", 'r')["features"]
 
         elif args.data_type == "numpy":
             self.data = np.load(args.data_file).astype("int")
