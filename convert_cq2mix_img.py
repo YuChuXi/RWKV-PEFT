@@ -90,6 +90,7 @@ class LOG_Processer:
         self.ctx = CTX
         self.pad_token = 65530
         self.message_separate = 24 # \x17
+        self.padding_length = 24
 
     def cq_code_unescape(self, cq_code):
         """
@@ -187,7 +188,7 @@ class LOG_Processer:
         parts = [f"<|{message.username}@{message.qq}{f'({message.group})' if message.group != "" else ""}|>: "]
         for part in message.content:
             if isinstance(part, str):
-                parts.append(part.replace("\n", "\\n"))
+                parts.append(part)
             elif isinstance(part, CQObject):
                 if part.type in self.cq_whitelist_1:
                     if part.type in ["image"]:
@@ -198,7 +199,6 @@ class LOG_Processer:
                             image_id = self.image_set[file]
                         else:
                             image_id = -1
-                            self.image_noid += 1
 
                         if file in self.image_count:
                             self.image_count[file]+=1
@@ -225,6 +225,8 @@ class LOG_Processer:
 
         def decompose_image_id(image_id: int) -> List[int]:
             """分解image_id为32768进制（高位在前）"""
+            if image_id == -1:
+                self.image_noid += 1
             ni = []
             while image_id > 0:
                 image_id, rem = divmod(image_id, 32768)
@@ -248,7 +250,7 @@ class LOG_Processer:
                 image_id = int(match.group(1))
                 ni = decompose_image_id(image_id)
                 non_pad_len = len(ni)
-                ni_padded = ([self.pad_token] + ni + [self.pad_token] * 24)[:24]
+                ni_padded = ([self.pad_token] + ni + [self.pad_token] * self.padding_length)[:self.padding_length]
                 
                 # 记录块信息
                 block_start = len(tokens)
@@ -257,7 +259,7 @@ class LOG_Processer:
                 last_idx = match.end()
 
             # 处理剩余文本
-            post_text = text[last_idx:]
+            post_text = prefix + text[last_idx:]
             tokens.extend(tokenizer.encode(post_text))
             return tokens, blocks
 
@@ -290,7 +292,7 @@ class LOG_Processer:
                     if block_start < self.ctx and (block_start + non_pad_len) > self.ctx:
                         replace_ranges.append((
                             block_start,
-                            min(block_start + 24, len(current_tokens))  # 块总长24
+                            min(block_start + self.padding_length, len(current_tokens))  # 块总长self.padding_length
                         ))
 
                 # 替换被截断的块
@@ -344,7 +346,7 @@ class LOG_Processer:
 
 
     def athread(self, f):
-        self.process_group(self.load_obj(f))
+        return self.process_group(self.load_obj(f))
 
     def convert_all(self):
         os.makedirs(self.obj_folder, exist_ok=True)
@@ -352,32 +354,33 @@ class LOG_Processer:
         # 流式处理并立即写入
         builder = MMapIndexedDatasetBuilder(self.log_output+".bin", dtype=numpy.uint16)
         def process_pipeline():
-            for f in os.listdir(self.log_folder):
-                yield self.athread(f)
-            # with concurrent.futures.ProcessPoolExecutor(max_workers=1) as executor:
-            #     file_list = os.listdir(self.log_folder)
-            #     for future in concurrent.futures.as_completed(
-            #         [executor.submit(self.athread, f) for f in file_list]
-            #     ):
-            #         yield future.result()
+            # for f in os.listdir(self.log_folder):
+            #     yield self.athread(f)
+            with concurrent.futures.ProcessPoolExecutor(max_workers=16) as executor:
+                file_list = os.listdir(self.log_folder)
+                for future in concurrent.futures.as_completed(
+                    [executor.submit(self.athread, f) for f in file_list]
+                ):
+                    yield future.result()
 
             
         # 分批写入
         buffer = []
         buffer_size = 10000  # 根据内存调整批处理大小
         for tokens in tqdm.tqdm(process_pipeline(), desc="Processing"):
-            buffer.append(tokens)
+            buffer.extend(tokens)
             if len(buffer) >= buffer_size:
                 random.shuffle(buffer)
                 for item in buffer:
                     builder.add_item(numpy.array(item, dtype=numpy.uint16))
-                buffer.clear()
+                buffer = buffer[buffer_size:]
 
         # 写入剩余数据
-        if buffer:
-            random.shuffle(buffer)
-            for item in buffer:
-                builder.add_item(numpy.array(item, dtype=numpy.uint16))
+        # if buffer:
+        #     random.shuffle(buffer)
+        #     for item in buffer:
+        #         print(item)
+        #         builder.add_item(numpy.array(item, dtype=numpy.uint16))
         
         builder.end_document()
         builder.finalize(self.log_output+".idx")
@@ -402,3 +405,5 @@ lp.convert_all()
 #     print('Token IDs:', tokens)
 #     print('Decoded text:', tokenizer.decode(tokens.tolist()))
 #     print('Token IDs:', tokens)
+
+# l178977

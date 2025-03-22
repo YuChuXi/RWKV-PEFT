@@ -169,8 +169,6 @@ class MyDataset(Dataset):
             if args.data_type == "mix_img":
                 import h5py
                 import numpy as np
-                with open(args.data_file + "img.ids", 'r') as f:
-                    self.image_names = {idx: line.strip() for idx, line in enumerate(f)}
                 self.image_features = h5py.File(args.data_file + "img.h5", 'r')
 
         elif args.data_type == "numpy":
@@ -375,8 +373,32 @@ class MyDataset(Dataset):
                 return x, y, mask
             
             if args.data_type == "mix_img":
-                pass
-                # TODO
+                starts = (x == 65530).nonzero().squeeze(1)
+                img = {}
+                mask = torch.ones(len(x)-1, dtype=torch.bool, device=x.device)  # 自动对齐自回归长度
+                
+                for pos in starts:
+                    start_idx = pos.item()
+                    # 检查区域完整性：后续24个token在有效范围内
+                    if start_idx + 24 >= len(x):
+                        continue
+                    
+                    # 验证后续24个token有效性
+                    region = x[start_idx+1 : start_idx+25]
+                    if torch.all((region < 32768) & (region != 65530)):
+                        # 设置loss mask: [start_idx, start_idx+23] 为0
+                        mask[start_idx : start_idx+24] = 0
+                        
+                        # 原特征提取逻辑
+                        id = 0
+                        for val in region:
+                            num = val.item()
+                            id = id * 32768 + num
+                        img[start_idx + 1] = self.image_features[id]
+                from tokenizer.rwkv_tokenizer import TRIE_TOKENIZER
+                print(TRIE_TOKENIZER("tokenizer/rwkv_vocab_v20230424.txt").decodeBytes((y*mask).tolist()).decode(errors="ignore"))
+                
+                return x, y, mask, img
 
             return x, y
 
