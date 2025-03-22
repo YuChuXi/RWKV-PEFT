@@ -18,6 +18,8 @@ tokenizer = TRIE_TOKENIZER("tokenizer/rwkv_vocab_v20230424.txt")
 
 CTX = 4096
 
+class InBlackList(Exception):
+    pass
 
 @dataclass()
 class CQObject:
@@ -41,11 +43,14 @@ class MMapIndexedDatasetBuilder(object):
         self._dtype = dtype
         self._sizes = []
         self._doc_idx = [0]
+
     def add_item(self, np_array):
         self._data_file.write(np_array.tobytes(order="C"))
         self._sizes.append(np_array.size)
+
     def end_document(self):
         self._doc_idx.append(len(self._sizes))
+
     def finalize(self, index_file):
         self._data_file.close()
         with MMapIndexedDataset.Index.writer(index_file, self._dtype) as index:
@@ -61,10 +66,12 @@ class LOG_Processer:
         self.log_output = "data/message_cache"
 
         self.group_set: Dict[str, Message] = {}
-        
+
         if os.path.isfile(self.log_output + ".img.ids"):
-            with open(self.log_output + ".img.ids", 'r') as f:
-                self.image_set: Dict[str, int] = {line.strip(): idx for idx, line in enumerate(f)}
+            with open(self.log_output + ".img.ids", "r") as f:
+                self.image_set: Dict[str, int] = {
+                    line.strip(): idx for idx, line in enumerate(f)
+                }
         else:
             self.image_set: Dict[str, int] = {}
 
@@ -74,7 +81,7 @@ class LOG_Processer:
         self.entries_pattern = re.compile(r"(\n\n<\|[^>]+?\|>: )")
         self.header_pattern = re.compile(r"<\|([^@]+?)@(\d+)(?:\(([^)]+)\))?\|>:")
         self.cq_pattern = re.compile(r"\[CQ:(.*?)\]", re.DOTALL)
-        self.cq_image_pattern = re.compile(r'\[CQ:image,id=(\d+)\]')
+        self.cq_image_pattern = re.compile(r"\[CQ:image,id=(\d+)\]")
 
         self.escape_list = [
             ("&#91;", "["),
@@ -83,29 +90,62 @@ class LOG_Processer:
             ("&amp;", "&"),
         ]
 
-        self.user_blocklist = []
-        self.cq_whitelist_1 = ["at", "face", "increase", "mface", "image"] # 会被基本原样保留的CQ码
-        self.cq_whitelist_2 = self.cq_whitelist_1 + ["video", "file"] # 会被保留type的CQ码
+        self.user_blocklist = [
+            "3889001246",
+            "3889001741",
+            "3889001044",
+            "2268875130",
+            "2854197266",
+            "1476468717",
+            "3685044091",
+            "1309886121",
+            "1358252269",
+            "1907724239",
+            "3968357593",
+            "2641913151",
+            "463899398",
+            "2013459491",
+            "1375783016",
+            "2796025799",
+            "2894658542",
+            "3054217020",
+            "2854214473",
+            "676715992",
+            "2238856062",
+            "2820096143",
+            "3116738725",
+            "2854211260",        ]
+        self.cq_whitelist_1 = [
+            "at",
+            "face",
+            "increase",
+            "mface",
+            "image",
+        ]  # 会被基本原样保留的CQ码
+        self.cq_whitelist_2 = self.cq_whitelist_1 + [
+            "video",
+            "file",
+        ]  # 会被保留type的CQ码
 
         self.ctx = CTX
         self.pad_token = 65530
-        self.message_separate = 24 # \x17
-        self.padding_length = 24
+        self.message_separate = 24  # \x17
+        self.padding_length = 12
 
     def cq_code_unescape(self, cq_code):
         """
         将CQ码中的HTML实体编码反转义为原始字符。
         """
-        for (escaped, original) in self.escape_list:
+        for escaped, original in self.escape_list:
             cq_code = cq_code.replace(escaped, original)
 
         return cq_code
-    
+
     def cq_code_escape(self, cq_code):
         """
         将CQ码中的HTML实体编码反转义为原始字符。
         """
-        for (escaped, original) in self.escape_list[::-1]:
+        for escaped, original in self.escape_list[::-1]:
             cq_code = cq_code.replace(original, escaped)
 
         return cq_code
@@ -134,6 +174,8 @@ class LOG_Processer:
                         key = self.cq_code_unescape(key.strip())
                         value = self.cq_code_unescape(value.strip())
                         params[key] = value
+            if cq_type == "at" and "qq" in params and params["qq"] in self.user_blocklist:
+                raise InBlackList
             parts.append(CQObject(cq_type, params))
             start = match.end()
         text_part = content[start:]
@@ -153,7 +195,12 @@ class LOG_Processer:
             username = match.group(1)
             qq = match.group(2)
             group = match.group(3) or ""
-            content_parts = self.parse_content(content)
+            if qq in self.user_blocklist:
+                continue
+            try:
+                content_parts = self.parse_content(content)
+            except InBlackList:
+                continue
             message = Message(username, qq, group, content_parts)
             if message is not None:
                 messages.append(message)
@@ -185,7 +232,9 @@ class LOG_Processer:
 
     def message_to_text(self, message: Message) -> str:
         """將Message對象轉換為處理後的文本"""
-        parts = [f"<|{message.username}@{message.qq}{f'({message.group})' if message.group != "" else ""}|>: "]
+        parts = [
+            f"<|{message.username}@{message.qq}{f'({message.group})' if message.group != "" else ""}|>: "
+        ]
         for part in message.content:
             if isinstance(part, str):
                 parts.append(part)
@@ -193,7 +242,7 @@ class LOG_Processer:
                 if part.type in self.cq_whitelist_1:
                     if part.type in ["image"]:
                         file = part.params.get("file", "")
-                        
+
                         ## 统计+编号
                         if file in self.image_set:
                             image_id = self.image_set[file]
@@ -201,7 +250,7 @@ class LOG_Processer:
                             image_id = -1
 
                         if file in self.image_count:
-                            self.image_count[file]+=1
+                            self.image_count[file] += 1
                         else:
                             self.image_count[file] = 1
 
@@ -213,11 +262,12 @@ class LOG_Processer:
                     cq_str += "]"
                     parts.append(cq_str)
                 else:
-                    parts.append(f"[CQ:{part.type}]")        
+                    parts.append(f"[CQ:{part.type}]")
         return "".join(parts)
 
-
-    def process_group(self, messages: List[Message], n_tokens: int = 0) -> List[List[int]]:
+    def process_group(
+        self, messages: List[Message], n_tokens: int = 0
+    ) -> List[List[int]]:
         """处理消息并替换图片ID为分解后的token序列"""
         slices = []
         current_tokens = []
@@ -242,16 +292,18 @@ class LOG_Processer:
             prefix = ""
             for match in self.cq_image_pattern.finditer(text):
                 # 处理匹配项前的文本
-                pre_text = prefix + text[last_idx:match.start()] + "[CQ:image,"
+                pre_text = prefix + text[last_idx : match.start()] + "[CQ:image,"
                 prefix = "]"
                 tokens.extend(tokenizer.encode(pre_text))
-                
+
                 # 处理图片ID
                 image_id = int(match.group(1))
                 ni = decompose_image_id(image_id)
                 non_pad_len = len(ni)
-                ni_padded = ([self.pad_token] + ni + [self.pad_token] * self.padding_length)[:self.padding_length]
-                
+                ni_padded = ([self.pad_token] + ni + [self.pad_token] * self.padding_length)[
+                    : self.padding_length
+                ]
+
                 # 记录块信息
                 block_start = len(tokens)
                 blocks.append((block_start, non_pad_len))
@@ -265,17 +317,16 @@ class LOG_Processer:
 
         for msg in tqdm.tqdm(messages, desc="dump&padding"):
             text = self.message_to_text(msg)
-            #print(text)
+
             msg_tokens, msg_blocks = process_text(text)
-            
+
             # 更新全局块索引
             prev_len = len(current_tokens)
             current_blocks = [
-                (prev_len + start, non_pad_len)
-                for (start, non_pad_len) in msg_blocks
+                (prev_len + start, non_pad_len) for (start, non_pad_len) in msg_blocks
             ]
             global_blocks.extend(current_blocks)
-            
+
             current_tokens.extend(msg_tokens)
 
             current_tokens += [self.message_separate]
@@ -289,11 +340,19 @@ class LOG_Processer:
                 # 检查需要替换的块
                 replace_ranges = []
                 for idx, (block_start, non_pad_len) in enumerate(global_blocks):
-                    if block_start < self.ctx and (block_start + non_pad_len) > self.ctx:
-                        replace_ranges.append((
-                            block_start,
-                            min(block_start + self.padding_length, len(current_tokens))  # 块总长self.padding_length
-                        ))
+                    if (
+                        block_start < self.ctx
+                        and (block_start + non_pad_len) > self.ctx
+                    ):
+                        replace_ranges.append(
+                            (
+                                block_start + 1,
+                                min(
+                                    block_start + self.padding_length,
+                                    len(current_tokens),
+                                ),  # 块总长self.padding_length
+                            )
+                        )
 
                 # 替换被截断的块
                 for start, end in replace_ranges:
@@ -302,9 +361,9 @@ class LOG_Processer:
                             current_tokens[i] = self.pad_token
 
                 # 切片并保留剩余token
-                slice_tokens = current_tokens[:self.ctx]
+                slice_tokens = current_tokens[: self.ctx]
                 slices.append(slice_tokens)
-                current_tokens = current_tokens[self.ctx:]
+                current_tokens = current_tokens[self.ctx :]
 
                 # 更新全局块索引
                 new_global_blocks = []
@@ -317,42 +376,46 @@ class LOG_Processer:
         # 处理最终剩余token
         if current_tokens:
             slices.append(current_tokens)
-        print('Decoded text:', tokenizer.decodeBytes(slices[-1]).decode(errors="ignore"))
+        print(
+            "Decoded text:", tokenizer.decodeBytes(slices[-1]).decode(errors="ignore")
+        )
         return slices
 
     # def old_process_group(self, messages: List[Message], n_tokens: int = 0) -> List[List[int]]:
-    #     """處理單個群組的消息並切片"""
+    #     """处理单个群组的消息并切片"""
     #     slices = []
     #     current_tokens = []
     #     pad_token = 65530
-        
+
     #     for msg in messages:
     #         text = self.message_to_text(msg)
     #         msg_tokens = tokenizer.encode(text)
-            
+
     #         if n_tokens > 0 and current_tokens:
     #             current_tokens += [pad_token] * n_tokens
-            
-    #         # 添加當前消息token
-    #         current_tokens.extend(msg_tokens)
-            
-    #         # 切片處理
-    #         while len(current_tokens) >= CTX:
-    #             slice_tokens = current_tokens[:CTX]
-    #             slices.append(slice_tokens)
-    #             current_tokens = []
-        
-    #     return slices
 
+    #         # 添加当前消息token
+    #         current_tokens.extend(msg_tokens)
+
+    #         ＃切片处理
+    #         而len（current_tokens）> = ctx：
+    #             slice_tokens = current_tokens [：ctx]
+    #             slices.append（slice_tokens）
+    #             current_tokens = []
+
+    #     return slices
 
     def athread(self, f):
         return self.process_group(self.load_obj(f))
 
     def convert_all(self):
         os.makedirs(self.obj_folder, exist_ok=True)
-        
+
         # 流式处理并立即写入
-        builder = MMapIndexedDatasetBuilder(self.log_output+".bin", dtype=numpy.uint16)
+        builder = MMapIndexedDatasetBuilder(
+            self.log_output + ".bin", dtype=numpy.uint16
+        )
+
         def process_pipeline():
             # for f in os.listdir(self.log_folder):
             #     yield self.athread(f)
@@ -363,7 +426,6 @@ class LOG_Processer:
                 ):
                     yield future.result()
 
-            
         # 分批写入
         buffer = []
         buffer_size = 10000  # 根据内存调整批处理大小
@@ -381,13 +443,13 @@ class LOG_Processer:
         #     for item in buffer:
         #         print(item)
         #         builder.add_item(numpy.array(item, dtype=numpy.uint16))
-        
+
         builder.end_document()
-        builder.finalize(self.log_output+".idx")
-        print(f"{len(builder._sizes)}\n"*8) 
+        builder.finalize(self.log_output + ".idx")
+        print(f"{len(builder._sizes)}\n" * 8)
         print("image no id", self.image_noid)
         joblib.dump(self.image_count, self.log_output + ".img.count")
-        
+
 
 lp = LOG_Processer()
 lp.convert_all()
