@@ -28,7 +28,33 @@ def get_vocab_size(args: TrainingArgs) -> int:
     del train_data
     return int(temp)
 
+def get_collate_fn(args: TrainingArgs):
+    if args.data_type != "mix_img":
+        return None
+    from torch.utils.data.dataloader import default_collate
+    from collections.abc import Sequence
+    def collate_fn(batch):
+        """自定义合并函数：
+        - 字典类型保留为列表
+        - 其他类型递归处理或默认堆叠
+        """
+        elem = batch[0]
+        
+        # 直接返回字典列表
+        if isinstance(elem, dict):
+            return batch
+        
+        # 递归处理序列元素
+        elif isinstance(elem, Sequence):
+            transposed = zip(*batch)
+            return [collate_fn(samples) for samples in transposed]
+        else:
+            return default_collate(batch)
+    return collate_fn
+
+
 def get_data_by_l_version(trainer: L.Trainer, args: TrainingArgs):
+
     if L.__version__[0] == '1':
         train_data = MyDataset(args)
         args.vocab_size = train_data.vocab_size
@@ -37,7 +63,7 @@ def get_data_by_l_version(trainer: L.Trainer, args: TrainingArgs):
         train_data.world_size = trainer.world_size
         train_data.setup(trainer.global_rank, trainer.world_size, 
                         int(args.devices), args.data_shuffle)
-        train_data = DataLoader(train_data, shuffle=args.data_shuffle, pin_memory=True, batch_size=args.micro_bsz, num_workers=1, persistent_workers=False, drop_last=True)
+        train_data = DataLoader(train_data, shuffle=args.data_shuffle, pin_memory=True, batch_size=args.micro_bsz, num_workers=1, persistent_workers=False, drop_last=True, collate_fn=get_collate_fn(args))
     
     elif L.__version__[0] == '2':
         train_data = MyDataModule(args)
@@ -84,7 +110,8 @@ class MyDataModule(L.LightningDataModule):
             batch_size=self.args.micro_bsz,
             num_workers=1,
             persistent_workers=False,
-            drop_last=True
+            drop_last=True,
+            collate_fn=get_collate_fn(self.args)
         )
 
 class MyDataset(Dataset):
@@ -347,7 +374,7 @@ class MyDataset(Dataset):
                 mask = self.generate_mask(dix, t1, t2, min_len)
                 return x, y, mask
             
-            if args.data_type == "mix_img"：
+            if args.data_type == "mix_img":
                 pass
                 # TODO
 
