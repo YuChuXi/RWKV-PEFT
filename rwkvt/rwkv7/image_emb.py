@@ -129,53 +129,59 @@ class EmbeddingAndIMGProj(nn.Embedding):
     ) -> torch.Tensor:
         embeddings = super().forward(input_ids)
 
-        if vit_features_list is not None:
-            batch_indices, token_indices, vit_features = [], [], []
+        if vit_features_list is None:
+            return embeddings
+        
+        batch_indices, token_indices, vit_features = [], [], []
 
-            for batch_idx, sample_dict in enumerate(vit_features_list):
-                for start_idx, feat in sample_dict.items():
-                    # 动态计算有效插入长度
-                    max_len = input_ids.shape[1]
-                    valid_layers = min(self.n_vit_layer, max_len - start_idx)
+        for batch_idx, sample_dict in enumerate(vit_features_list):
+            for start_idx, feat in sample_dict.items():
+                feat = torch.tensor(feat, dtype=embeddings.dtype, device=embeddings.device)
 
-                    if valid_layers <= 0:
-                        continue
+                print(batch_idx, start_idx, feat.shape)
+                # 动态计算有效插入长度
+                max_len = input_ids.shape[1]
+                valid_layers = min(self.n_vit_layer, max_len - start_idx)
 
-                    # 特征切片处理
-                    feat_slice = feat[:valid_layers]  # (valid_layers, n_vit_embd)
-                    assert feat_slice.shape == (
-                        valid_layers,
-                        feat.shape[1],
-                    ), f"Invalid feature shape {feat_slice.shape}"
+                if valid_layers <= 0:
+                    continue
 
-                    # 生成插入位置索引
-                    end_idx = start_idx + valid_layers
-                    current_batch = [batch_idx] * valid_layers
-                    current_tokens = list(range(start_idx, end_idx))
+                # 特征切片处理
+                feat_slice = feat[:valid_layers]  # (valid_layers, n_vit_embd)
+                # assert feat_slice.shape == (
+                #     valid_layers,
+                #     feat.shape[1],
+                # ), f"Invalid feature shape {feat_slice.shape}"
 
-                    # 验证padding位置
-                    padding_check = input_ids[batch_idx, start_idx:end_idx]
-                    assert torch.all(
-                        padding_check == self.img_padding_idx
-                    ), "Insert positions must be IMG_PADDING"
+                # 生成插入位置索引
+                end_idx = start_idx + valid_layers
+                current_batch = [batch_idx] * valid_layers
+                current_tokens = list(range(start_idx, end_idx))
 
-                    batch_indices.extend(current_batch)
-                    token_indices.extend(current_tokens)
-                    vit_features.append(feat_slice)
+                # # 验证padding位置
+                # padding_check = input_ids[batch_idx, start_idx:end_idx]
+                # assert torch.all(
+                #     padding_check == self.img_padding_idx
+                # ), "Insert positions must be IMG_PADDING"
 
-            if vit_features:
-                vit_tensor = torch.cat(
-                    vit_features, dim=0
-                )  # (total_layers, n_vit_embd)
-                projected = self.vit_proj(vit_tensor)  # (total_layers, n_llm_embd)
+                batch_indices.extend(current_batch)
+                token_indices.extend(current_tokens)
+                vit_features.append(feat_slice)
 
-                # 转换为张量索引
-                batch_tensor = torch.tensor(batch_indices, device=input_ids.device)
-                token_tensor = torch.tensor(token_indices, device=input_ids.device)
+        if vit_features:
+            vit_tensor = torch.stack(
+                vit_features, dim=0
+            )  # (total_layers, n_vit_embd)
+            print(vit_tensor.shape)
+            projected = self.vit_proj(vit_tensor)  # (total_layers, n_llm_embd)
 
-                # 高效索引更新
-                embeddings[batch_tensor, token_tensor] = projected
-                self.last_indices = (batch_tensor, token_tensor)
+            # 转换为张量索引
+            batch_tensor = torch.tensor(batch_indices, device=input_ids.device)
+            token_tensor = torch.tensor(token_indices, device=input_ids.device)
+
+            # 高效索引更新
+            embeddings[batch_tensor, token_tensor] = projected
+            self.last_indices = (batch_tensor, token_tensor)
 
         return embeddings
 

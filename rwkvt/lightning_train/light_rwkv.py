@@ -177,8 +177,8 @@ class RWKV(pl.LightningModule):
                 last_wkv_states: torch.Tensor):
             return self.model(idx, last_shift_states, last_wkv_states)
     else:
-        def forward(self, idx, attention_mask=None):
-            return self.model(idx, attention_mask)
+        def forward(self, idx, attention_mask=None, vit_features_list=None):
+            return self.model(idx, attention_mask, vit_features_list)
 
     if os.environ.get("RWKV_TRAIN_TYPE") == 'infctx':
         def training_step(self, batch, batch_idx):

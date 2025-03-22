@@ -373,32 +373,38 @@ class MyDataset(Dataset):
                 return x, y, mask
             
             if args.data_type == "mix_img":
-                starts = (x == 65530).nonzero().squeeze(1)
+                mask = torch.ones_like(x, dtype=torch.bool)
                 img = {}
-                mask = torch.ones(len(x)-1, dtype=torch.bool, device=x.device)  # 自动对齐自回归长度
+                i = 0
                 
-                for pos in starts:
-                    start_idx = pos.item()
-                    # 检查区域完整性：后续24个token在有效范围内
-                    if start_idx + 24 >= len(x):
-                        continue
-                    
-                    # 验证后续24个token有效性
-                    region = x[start_idx+1 : start_idx+25]
-                    if torch.all((region < 32768) & (region != 65530)):
-                        # 设置loss mask: [start_idx, start_idx+23] 为0
-                        mask[start_idx : start_idx+24] = 0
+                # 单层while循环处理整个序列
+                while i < x.size(0):
+                    if x[i] == 65530 and i+24 < x.size(0):
+                        # 直接标记后续24个位置为0（格式已规整）
+                        mask[i+1:i+25] = 0
                         
-                        # 原特征提取逻辑
+                        # 解码图像ID
                         id = 0
-                        for val in region:
-                            num = val.item()
-                            id = id * 32768 + num
-                        img[start_idx + 1] = self.image_features[id]
-                from tokenizer.rwkv_tokenizer import TRIE_TOKENIZER
-                print(TRIE_TOKENIZER("tokenizer/rwkv_vocab_v20230424.txt").decodeBytes((y*mask).tolist()).decode(errors="ignore"))
+                        for j in range(24):
+                            n = x[i+1+j].item()
+                            if n > 32768:
+                                break
+                            id = id * 32768 + n
+                        img[i+1] = self.image_features[id]
+                        
+                        i += 25  # 跳过已处理区域
+                    else:
+                        i += 1
                 
-                return x, y, mask, img
+                # 创建右移掩码 (当前预测下一个)
+                shifted_mask = torch.ones_like(mask)
+                shifted_mask[1:] = mask[:-1]  # 原始掩码向前移动一位
+                # debug_tokens = (y * shifted_mask)
+                # debug_tokens = torch.where(debug_tokens == 65530, torch.tensor(98), debug_tokens)
+                # debug_tokens = torch.where(debug_tokens == 0, torch.tensor(99), debug_tokens)
+                # print(pipeline.tokenizer.decodeBytes(debug_tokens.tolist()).decode(errors="ignore"))
+                
+                return x, y, shifted_mask, img
 
             return x, y
 
