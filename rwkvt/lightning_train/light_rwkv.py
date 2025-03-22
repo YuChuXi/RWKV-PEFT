@@ -87,7 +87,7 @@ class RWKV(pl.LightningModule):
             self.criterion = FusedCrossEntropyLoss(inplace_backward=True)
         else:
             FusedCrossEntropyLoss = None
-            if args.loss_mask!='none' or args.data_typein ['jsonl', 'sft', 'mix_img']:
+            if args.loss_mask!='none' or args.data_type in ['jsonl', 'sft', 'mix_img']:
                 self.criterion = nn.CrossEntropyLoss(reduction='none')
             else:
                 self.criterion = nn.CrossEntropyLoss()
