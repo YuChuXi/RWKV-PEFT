@@ -378,21 +378,22 @@ class MyDataset(Dataset):
                 i = 0
                 
                 # 单层while循环处理整个序列
+                n_layer = 12
                 while i < x.size(0):
-                    if x[i] == 65530 and i+24 < x.size(0):
+                    if x[i] == 65530 and i+n_layer < x.size(0):
                         # 直接标记后续24个位置为0（格式已规整）
                         mask[i+1:i+25] = 0
                         
                         # 解码图像ID
                         id = 0
-                        for j in range(24):
+                        for j in range(n_layer):
                             n = x[i+1+j].item()
                             if n > 32768:
                                 break
                             id = id * 32768 + n
                         img[i+1] = self.image_features[id]
                         
-                        i += 25  # 跳过已处理区域
+                        i += (n_layer + 1)  # 跳过已处理区域
                     else:
                         i += 1
                 
