@@ -241,7 +241,7 @@ class RWKV(pl.LightningModule):
                 mask = mask.reshape(-1)
                 sum_mask = torch.sum(mask).item()
                 
-                loss = self.criterion(logits.view(-1, logits.size(-1)), targets.view(-1), reduction='none')
+                loss = self.criterion(logits.view(-1, logits.size(-1)), targets.view(-1))
                 loss = torch.sum(loss * mask) / sum_mask
             if args.data_type=='mix_img': # 肯定有loss mask
                 idx, targets, mask, imgs = batch
@@ -251,7 +251,7 @@ class RWKV(pl.LightningModule):
                 mask = mask.reshape(-1)
                 sum_mask = torch.sum(mask).item()
                 
-                loss = self.criterion(logits.view(-1, logits.size(-1)), targets.view(-1), reduction='none')
+                loss = self.criterion(logits.view(-1, logits.size(-1)), targets.view(-1))
                 loss = torch.sum(loss * mask) / sum_mask
 
                 # 反算vit及计算loss
