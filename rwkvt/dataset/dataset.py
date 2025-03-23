@@ -380,19 +380,23 @@ class MyDataset(Dataset):
                 # 单层while循环处理整个序列
                 n_layer = 12
                 while i < x.size(0):
-                    if x[i] == 65530 and i+n_layer < x.size(0):
-                        # 直接标记后续24个位置为0（格式已规整）
-                        mask[i+1:i+25] = 0
+                    if x[i] == 65530 and i + n_layer < x.size(0):
+                        # 直接标记后续24个位置为0
+                        mask[i + 1 : i + n_layer + 1] = 0
                         
                         # 解码图像ID
-                        id = 0
+                        img_id = 0
                         for j in range(n_layer):
-                            n = x[i+1+j].item()
+                            n = x[i + 1 + j].item()
                             if n > 32768:
                                 break
-                            id = id * 32768 + n
-                        img[i+1] = self.image_features[id]
-                        
+                            img_id = img_id * 32768 + n
+
+                        try:
+                            img[i + 1] = self.image_features[img_id,...]
+                        except Exception as e:
+                            rank_zero_info(f"Warning! image: {img_id} load fail: {e}, skip")
+                            print(x.tolist())
                         i += (n_layer + 1)  # 跳过已处理区域
                     else:
                         i += 1

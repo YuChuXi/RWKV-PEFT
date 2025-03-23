@@ -9,3 +9,7 @@ GPUtil
 plotly
 lightning
 datasets
+
+h5py
+wandb
+tqdm

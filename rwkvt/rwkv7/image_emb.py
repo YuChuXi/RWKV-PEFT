@@ -1,3 +1,4 @@
+import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -118,7 +119,9 @@ class EmbeddingAndIMGProj(nn.Embedding):
         )
 
         self.register_buffer("last_batch_indices", None)
-        self.register_buffer("last_token_indices", None)  # (batch_indices, token_indices)
+        self.register_buffer(
+            "last_token_indices", None
+        )  # (batch_indices, token_indices)
 
         # 用于计算loss
         self.temperature = temperature
@@ -134,12 +137,14 @@ class EmbeddingAndIMGProj(nn.Embedding):
 
         if vit_features_list is None:
             return embeddings
-        
+
         batch_indices, token_indices, vit_features = [], [], []
 
         for batch_idx, sample_dict in enumerate(vit_features_list):
             for start_idx, feat in sample_dict.items():
-                feat = torch.tensor(feat, dtype=embeddings.dtype, device=embeddings.device)
+                feat = torch.tensor(
+                    feat, dtype=embeddings.dtype, device=embeddings.device
+                )
 
                 # 动态计算有效插入长度
                 max_len = input_ids.shape[1]
@@ -171,23 +176,36 @@ class EmbeddingAndIMGProj(nn.Embedding):
                 vit_features.append(feat_slice)
 
         if vit_features:
-            vit_tensor = torch.stack(
-                vit_features, dim=0
-            )  # (total_layers, n_vit_embd)
-            projected = self.vit_proj(vit_tensor)  # (total_layers, n_llm_embd)
 
             # 转换为张量索引
             batch_tensor = torch.tensor(batch_indices, device=input_ids.device)
             token_tensor = torch.tensor(token_indices, device=input_ids.device)
 
+            vit_tensor = torch.cat(vit_features)  # (sum(layers), n_vit_embd)
+            L = vit_tensor.size(0)
+            padding_length = (math.ceil(L / self.n_vit_layer) * self.n_vit_layer) - L
+            vit_tensor = F.pad(vit_tensor, (0, 0, 0, padding_length))  # (B * L, D)
+            vit_tensor = vit_tensor.view(
+                -1, self.n_vit_layer, self.n_vit_embd
+            )  # (B, L, D)
+
+            projected = self.vit_proj(vit_tensor)  # (b, layers, n_llm_embd)
+
+            projected = projected.flatten(start_dim=0, end_dim=1)[:L]
+
             # 高效索引更新
-            embeddings[batch_tensor, token_tensor] = projected.flatten(start_dim=0, end_dim=1)
-            self.last_batch_indices, self.last_token_indices = batch_tensor, token_tensor
+            embeddings[batch_tensor, token_tensor] = projected
+            self.last_batch_indices, self.last_token_indices = (
+                batch_tensor,
+                token_tensor,
+            )
 
         return embeddings
 
     def decode_vit_features(self, outputs: torch.Tensor) -> torch.Tensor:
-        assert (self.last_batch_indices is not None) and (self.last_token_indices is not None), "Run forward with vit features first"
+        assert (self.last_batch_indices is not None) and (
+            self.last_token_indices is not None
+        ), "Run forward with vit features first"
 
         # 考虑自回归模型的输出位移
         batch_indices, token_indices = self.last_batch_indices, self.last_token_indices
@@ -195,11 +213,17 @@ class EmbeddingAndIMGProj(nn.Embedding):
 
         # 提取输出特征并逆投影
         vit_outputs = outputs[batch_indices, shifted_tokens]  # (N, n_llm_embd)
+
         L = vit_outputs.size(0)
-        padding_length = (L // self.n_vit_layer * self.n_vit_layer) - L
-        vit_outputs_padded = F.pad(vit_outputs, (0, 0, 0, padding_length)) # (B * L, D)
-        vit_outputs_padded = vit_outputs_padded.view(-1, self.n_vit_layer, self.embedding_dim) # (B, L, D)
+        padding_length = (math.ceil(L / self.n_vit_layer) * self.n_vit_layer) - L
+        vit_outputs_padded = F.pad(vit_outputs, (0, 0, 0, padding_length))  # (B * L, D)
+        vit_outputs_padded = vit_outputs_padded.view(
+            -1, self.n_vit_layer, self.embedding_dim
+        )  # (B, L, D)
+
         vit_recon = self.reverse_vit_proj(vit_outputs_padded)
+        
+        vit_recon = vit_recon.flatten(start_dim=0, end_dim=1)[:L]
         return vit_recon  # (B, L, D)
 
     def vit_reconstruction_loss(
@@ -226,7 +250,7 @@ class EmbeddingAndIMGProj(nn.Embedding):
         # 解码ViT特征
         reconstructed = self.decode_vit_features(
             model_output
-        ).flatten(start_dim=0, end_dim=1)  # (total_layers, vit_dim)
+        )  # (total_layers, vit_dim)
 
         # 对齐原始特征
         batch_size, seq_len = model_output.shape[:2]
@@ -237,7 +261,9 @@ class EmbeddingAndIMGProj(nn.Embedding):
         for batch_idx, sample_dict in enumerate(vit_features_list):
             for start_idx, feat in sample_dict.items():
 
-                feat = torch.tensor(feat, dtype=reconstructed.dtype, device=reconstructed.device)
+                feat = torch.tensor(
+                    feat, dtype=reconstructed.dtype, device=reconstructed.device
+                )
                 # 有效性检查
                 assert feat.shape[1] == self.n_vit_embd, "Feature dimension mismatch"
 
