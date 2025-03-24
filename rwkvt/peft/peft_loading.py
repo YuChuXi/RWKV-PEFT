@@ -76,6 +76,13 @@ def load_peft_model(args: TrainingArgs):
                         param.requires_grad = True
                 break
 
+        if args.data_type == 'mix_img': # 训练图片投影
+            for name, module in model.named_modules():
+                for pname, param in module.named_parameters():
+                    if 'emb.vit' in pname:
+                        param.requires_grad = True
+                break
+
     if len(args.load_model) == 0 or args.my_pile_stage == 1:  # shall we build the initial weights?
         init_weight_name = f"{args.proj_dir}/rwkv-init.pth"
         generate_init_weight(model, init_weight_name)  # save initial weights

@@ -196,6 +196,9 @@ class train_callback(pl.Callback):
                             peft_dict[name] = state
                         elif args.peft in name:
                             peft_dict[name] = state
+                        if 'emb.vit' in name:
+                            peft_dict[name] = state
+
 
                     to_save_dict = peft_dict
 

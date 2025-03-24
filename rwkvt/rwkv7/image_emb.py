@@ -114,7 +114,7 @@ class EmbeddingAndIMGProj(nn.Embedding):
         self.vit_proj = ViTProj(
             n_vit_layer=n_vit_layer, n_vit_embd=n_vit_embd, n_llm_embd=embedding_dim
         )
-        self.reverse_vit_proj = ReViTProj(
+        self.vit_reverse_proj = ReViTProj(
             n_vit_layer=n_vit_layer, n_llm_embd=embedding_dim, n_vit_embd=n_vit_embd
         )
 
@@ -221,7 +221,7 @@ class EmbeddingAndIMGProj(nn.Embedding):
             -1, self.n_vit_layer, self.embedding_dim
         )  # (B, L, D)
 
-        vit_recon = self.reverse_vit_proj(vit_outputs_padded)
+        vit_recon = self.vit_reverse_proj(vit_outputs_padded)
         
         vit_recon = vit_recon.flatten(start_dim=0, end_dim=1)[:L]
         return vit_recon  # (B, L, D)
@@ -301,10 +301,11 @@ class EmbeddingAndIMGProj(nn.Embedding):
             self.recon_weight * recon_loss + self.contrast_weight * contrast_loss
         )
 
+        
         return total_loss, {
-            "total_loss": total_loss.detach(),
-            "recon_loss": recon_loss.detach(),
-            "contrast_loss": contrast_loss.detach(),
+            "vit_total_loss": total_loss.detach(),
+            "vit_recon_loss": recon_loss.detach(),
+            "vit_contrast_loss": contrast_loss.detach(),
         }
 
     # 保持与原始Embedding兼容的方法
