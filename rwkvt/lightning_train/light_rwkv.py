@@ -124,8 +124,8 @@ class RWKV(pl.LightningModule):
                 lr_3x.add(n)
             elif (len(p.squeeze().shape) >= 2) and (args.weight_decay > 0):
                 lr_decay.add(n)
-            # elif ("emb.vit" in n):
-            #     lr_2x.add(n)
+            elif ("emb.vit" in n):
+                lr_3x.add(n)
             else:
                 lr_1x.add(n)
 
@@ -260,9 +260,8 @@ class RWKV(pl.LightningModule):
                 # 反算vit及计算loss
                 loss_vit, other_loss = self.model.emb.vit_reconstruction_loss(x, imgs)
                 # FIXME wandb
-                other_loss["llm_loss"] = loss.detach()
                 wandb.log(other_loss, commit=False)
-                loss = loss + loss_vit # FIXME
+                loss = loss + loss_vit * 0.5 # FIXME
 
             elif args.loss_mask!='none' or args.data_type=='jsonl':
                 idx, targets, mask = batch
