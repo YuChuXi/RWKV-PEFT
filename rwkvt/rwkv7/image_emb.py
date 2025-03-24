@@ -118,36 +118,21 @@ class EmbeddingAndIMGProj(nn.Embedding):
             n_vit_layer=n_vit_layer, n_llm_embd=embedding_dim, n_vit_embd=n_vit_embd
         )
 
-        self.register_buffer("last_batch_indices", None)
-        self.register_buffer(
-            "last_token_indices", None
-        )  # (batch_indices, token_indices)
+        self.register_buffer("model_input", None)
 
         # 用于计算loss
         self.temperature = temperature
         self.recon_weight = recon_weight
         self.contrast_weight = contrast_weight
 
-    def forward(
-        self,
-        input_ids: torch.Tensor,
-        vit_features_list: Optional[List[Dict[int, torch.Tensor]]] = None,
-    ) -> torch.Tensor:
-        embeddings = super().forward(input_ids)
-
-        if vit_features_list is None:
-            return embeddings
-
+    def arrange_vit_feature(self, vit_features_list, max_len):
         batch_indices, token_indices, vit_features = [], [], []
-
         for batch_idx, sample_dict in enumerate(vit_features_list):
             for start_idx, feat in sample_dict.items():
                 feat = torch.tensor(
-                    feat, dtype=embeddings.dtype, device=embeddings.device
+                    feat, dtype=self.weight.dtype, device=self.weight.device
                 )
 
-                # 动态计算有效插入长度
-                max_len = input_ids.shape[1]
                 valid_layers = min(self.n_vit_layer, max_len - start_idx)
 
                 if valid_layers <= 0:
@@ -176,25 +161,33 @@ class EmbeddingAndIMGProj(nn.Embedding):
                 vit_features.append(feat_slice)
 
         if vit_features:
-
             # 转换为张量索引
-            batch_tensor = torch.tensor(batch_indices, device=input_ids.device)
-            token_tensor = torch.tensor(token_indices, device=input_ids.device)
-
+            batch_tensor = torch.tensor(batch_indices, device=self.weight.device)
+            token_tensor = torch.tensor(token_indices, device=self.weight.device)
             vit_tensor = torch.cat(vit_features)  # (sum(layers), n_vit_embd)
-            L = vit_tensor.size(0)
-            padding_length = (math.ceil(L / self.n_vit_layer) * self.n_vit_layer) - L
-            vit_tensor = F.pad(vit_tensor, (0, 0, 0, padding_length))  # (B * L, D)
-            vit_tensor = vit_tensor.view(
-                -1, self.n_vit_layer, self.n_vit_embd
-            )  # (B, L, D)
+            return batch_tensor, token_tensor, vit_tensor
+        return None, None, None
 
-            projected = self.vit_proj(vit_tensor)  # (b, layers, n_llm_embd)
+    def forward(
+        self,
+        input_ids: torch.Tensor,
+        vit_features_list: Optional[List[Dict[int, torch.Tensor]]] = None,
+    ) -> torch.Tensor:
+        embeddings = super().forward(input_ids)
 
-            projected = projected.flatten(start_dim=0, end_dim=1)[:L]
+        if vit_features_list is None:
+            return embeddings
 
-            # 高效索引更新
-            embeddings[batch_tensor, token_tensor] = projected
+        # 动态计算有效插入长度
+        max_len = input_ids.shape[1]
+        batch_tensor, token_tensor, vit_tensor = self.arrange_vit_feature(
+            vit_features_list, max_len
+        )
+
+        if vit_tensor:
+            model_input = self.encode_vit_features(vit_tensor)
+            embeddings[batch_tensor, token_tensor] = model_input
+            self.model_input = model_input
             self.last_batch_indices, self.last_token_indices = (
                 batch_tensor,
                 token_tensor,
@@ -202,18 +195,19 @@ class EmbeddingAndIMGProj(nn.Embedding):
 
         return embeddings
 
-    def decode_vit_features(self, outputs: torch.Tensor) -> torch.Tensor:
-        assert (self.last_batch_indices is not None) and (
-            self.last_token_indices is not None
-        ), "Run forward with vit features first"
+    def encode_vit_features(self, vit_inputs: torch.Tensor) -> torch.Tensor:
+        L = vit_inputs.size(0)
+        padding_length = (math.ceil(L / self.n_vit_layer) * self.n_vit_layer) - L
+        vit_inputs_padded = F.pad(vit_inputs, (0, 0, 0, padding_length))  # (B * L, D)
+        vit_inputs_padded = vit_inputs_padded.view(
+            -1, self.n_vit_layer, self.n_vit_embd
+        )  # (B, L, D)
 
-        # 考虑自回归模型的输出位移
-        batch_indices, token_indices = self.last_batch_indices, self.last_token_indices
-        shifted_tokens = torch.clamp(token_indices - 1, min=0)  # 处理序列起始位置
+        projected = self.vit_proj(vit_inputs_padded)  # (b, L, n_llm_embd)
 
-        # 提取输出特征并逆投影
-        vit_outputs = outputs[batch_indices, shifted_tokens]  # (N, n_llm_embd)
+        return projected.flatten(start_dim=0, end_dim=1)[:L]  # (B * L, D)
 
+    def decode_vit_features(self, vit_outputs: torch.Tensor) -> torch.Tensor:
         L = vit_outputs.size(0)
         padding_length = (math.ceil(L / self.n_vit_layer) * self.n_vit_layer) - L
         vit_outputs_padded = F.pad(vit_outputs, (0, 0, 0, padding_length))  # (B * L, D)
@@ -221,10 +215,9 @@ class EmbeddingAndIMGProj(nn.Embedding):
             -1, self.n_vit_layer, self.embedding_dim
         )  # (B, L, D)
 
-        vit_recon = self.vit_reverse_proj(vit_outputs_padded)
-        
-        vit_recon = vit_recon.flatten(start_dim=0, end_dim=1)[:L]
-        return vit_recon  # (B, L, D)
+        reprojected = self.vit_reverse_proj(vit_outputs_padded)
+
+        return reprojected.flatten(start_dim=0, end_dim=1)[:L]  # (B * L, D)
 
     def vit_reconstruction_loss(
         self,
@@ -236,10 +229,6 @@ class EmbeddingAndIMGProj(nn.Embedding):
         参数：
             model_output: LLM的输出隐状态 (batch_size, seq_len, hidden_dim)
             vit_features_list: 原始ViT特征列表
-            embed_module: 使用的嵌入投影模块实例
-            temperature: 对比学习温度系数
-            recon_weight: 特征重建损失权重
-            contrast_weight: 对比学习损失权重
         返回：
             total_loss: 总损失值
             loss_dict: 各损失分量详情
@@ -248,64 +237,48 @@ class EmbeddingAndIMGProj(nn.Embedding):
         assert model_output.dim() == 3, "Model output should be 3D tensor"
 
         # 解码ViT特征
-        reconstructed = self.decode_vit_features(
-            model_output
-        )  # (total_layers, vit_dim)
 
-        # 对齐原始特征
-        batch_size, seq_len = model_output.shape[:2]
-        original_features = []
-        valid_mask = []
-
-        # 遍历所有样本和插入位置
-        for batch_idx, sample_dict in enumerate(vit_features_list):
-            for start_idx, feat in sample_dict.items():
-
-                feat = torch.tensor(
-                    feat, dtype=reconstructed.dtype, device=reconstructed.device
-                )
-                # 有效性检查
-                assert feat.shape[1] == self.n_vit_embd, "Feature dimension mismatch"
-
-                # 计算实际可插入层数
-                max_valid = min(feat.size(0), seq_len - start_idx)
-                if max_valid <= 0:
-                    continue
-
-                # 保留有效特征
-                valid_feat = feat[:max_valid]
-                original_features.append(valid_feat)
-                valid_mask.append(torch.ones(max_valid, dtype=torch.bool))
-
+        # 考虑自回归模型的输出位移
+        max_len = model_output.shape[1]
+        batch_tensor, token_tensor, vit_input = self.arrange_vit_feature(
+            vit_features_list, max_len
+        )
         # 无有效特征时返回零损失
-        if not original_features:
+        if not vit_input:
             return torch.tensor(0.0, device=model_output.device), {}
 
-        # 合并特征并创建掩码
-        original = torch.cat(original_features, dim=0)
-        valid_mask = torch.cat(valid_mask, dim=0)
+        model_input = self.model_input
+
+        # 提取输出特征并逆投影
+        shifted_tokens = torch.clamp(token_tensor - 1, min=0)  # 处理序列起始位置
+        model_output = model_output[batch_tensor, shifted_tokens]  # (N, n_llm_embd)
+
+        # 最终vit特征
+        vit_output = self.decode_vit_features(model_output)  # (total_layers, vit_dim)
 
         # 重建损失计算
-        recon_loss = F.mse_loss(reconstructed[valid_mask], original)
+        vit_recon_loss = F.mse_loss(vit_output, vit_input)
+        vit_emb_loss = F.mse_loss(model_output, model_input)
 
-        # 对比学习损失
-        norm_recon = F.normalize(reconstructed[valid_mask], dim=-1)
-        norm_original = F.normalize(original, dim=-1)
-        logits = torch.einsum("nd,md->nm", norm_recon, norm_original) / self.temperature
-        contrast_loss = F.cross_entropy(
-            logits, torch.arange(logits.size(0), device=logits.device)
-        )
+        total_loss =  + vit_emb_loss
 
-        # 损失组合
-        total_loss = (
-            self.recon_weight * recon_loss + self.contrast_weight * contrast_loss
-        )
+        # # 对比学习损失
+        # norm_recon = F.normalize(reconstructed[valid_mask], dim=-1)
+        # norm_original = F.normalize(original, dim=-1)
+        # logits = torch.einsum("nd,md->nm", norm_recon, norm_original) / self.temperature
+        # contrast_loss = F.cross_entropy(
+        #     logits, torch.arange(logits.size(0), device=logits.device)
+        # )
 
-        
+        # # 损失组合
+        # total_loss = (
+        #     self.recon_weight * recon_loss + self.contrast_weight * contrast_loss
+        # )
+
         return total_loss, {
             "vit_total_loss": total_loss.detach(),
-            "vit_recon_loss": recon_loss.detach(),
-            "vit_contrast_loss": contrast_loss.detach(),
+            "vit_recon_loss": vit_recon_loss.detach(),
+            "vit_emb_loss": vit_emb_loss.detach(),
         }
 
     # 保持与原始Embedding兼容的方法
