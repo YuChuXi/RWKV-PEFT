@@ -260,7 +260,7 @@ class EmbeddingAndIMGProj(nn.Embedding):
         vit_recon_loss = F.mse_loss(vit_output, vit_input)
         vit_emb_loss = F.mse_loss(model_output, model_input)
 
-        total_loss =  + vit_emb_loss
+        total_loss = vit_recon_loss * 10 + vit_emb_loss * 0.2
 
         # # 对比学习损失
         # norm_recon = F.normalize(reconstructed[valid_mask], dim=-1)
