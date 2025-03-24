@@ -184,7 +184,7 @@ class EmbeddingAndIMGProj(nn.Embedding):
             vit_features_list, max_len
         )
 
-        if vit_tensor:
+        if vit_tensor is not None:
             model_input = self.encode_vit_features(vit_tensor)
             embeddings[batch_tensor, token_tensor] = model_input
             self.model_input = model_input
@@ -244,7 +244,7 @@ class EmbeddingAndIMGProj(nn.Embedding):
             vit_features_list, max_len
         )
         # 无有效特征时返回零损失
-        if not vit_input:
+        if vit_input is None:
             return torch.tensor(0.0, device=model_output.device), {}
 
         model_input = self.model_input

@@ -260,6 +260,7 @@ class RWKV(pl.LightningModule):
                 # 反算vit及计算loss
                 loss_vit, other_loss = self.model.emb.vit_reconstruction_loss(x, imgs)
                 # FIXME wandb
+                other_loss["token_loss"] = loss.detach()
                 wandb.log(other_loss, commit=False)
                 loss = loss + loss_vit * 0.5 # FIXME
 
