@@ -249,7 +249,7 @@ class RWKV(pl.LightningModule):
             if args.data_type=='mix_img': # 肯定有loss mask
                 idx, targets, mask, imgs = batch
 
-                logits, x = self(idx, mask, imgs)
+                logits, x = self(idx, None, imgs)
 
                 mask = mask.reshape(-1)
                 sum_mask = torch.sum(mask).item()
