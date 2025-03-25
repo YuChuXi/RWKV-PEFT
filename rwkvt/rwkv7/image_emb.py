@@ -257,7 +257,7 @@ class EmbeddingAndIMGProj(nn.Embedding):
         vit_output = self.decode_vit_features(model_output)  # (total_layers, vit_dim)
 
         # 重建损失计算
-        vit_recon_loss = F.mse_loss(vit_output, vit_input)
+        vit_recon_loss = F.l1_loss(vit_output, vit_input) # 值太小
         vit_emb_loss = F.mse_loss(model_output, model_input)
 
         total_loss = vit_recon_loss * 10 + vit_emb_loss * 0.2
