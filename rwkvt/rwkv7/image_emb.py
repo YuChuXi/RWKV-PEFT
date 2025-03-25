@@ -100,6 +100,8 @@ class EmbeddingAndIMGProj(nn.Embedding):
         temperature: float = 0.07,
         recon_weight: float = 1.0,
         contrast_weight: float = 0.5,
+        device=None,
+        dtype=None,
         **kwargs,
     ):
         # 继承父类初始化
@@ -107,8 +109,11 @@ class EmbeddingAndIMGProj(nn.Embedding):
             num_embeddings=num_embeddings,
             embedding_dim=embedding_dim,
             padding_idx=img_padding_idx,
+            device=None,
+            dtype=None,
             **kwargs,
         )
+
 
         self.n_vit_layer = n_vit_layer
         self.n_vit_embd = n_vit_embd
@@ -261,7 +266,7 @@ class EmbeddingAndIMGProj(nn.Embedding):
         vit_output = self.decode_vit_features(model_output)  # (total_layers, vit_dim)
 
         # 重建损失计算
-        vit_recon_loss = F.l1_loss(vit_output, vit_input) # 值太小
+        vit_recon_loss = F.l1_loss(vit_output, vit_input)  # 值太小
         vit_emb_loss = F.mse_loss(model_output, model_input)
 
         total_loss = vit_recon_loss * 10 + vit_emb_loss * 0.2
