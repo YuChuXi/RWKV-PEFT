@@ -42,8 +42,8 @@ class ViTProj(nn.Module):
         x = self.drop(x)
         x = self.gn1(x)  # 输入形状: (batch_size, n_vit_layer, hidden_dim)
 
-        # 第二层投影
-        x = torch.einsum("blh,lho->blo", x, self.w2) + self.b2.unsqueeze(0)
+        # 第二层残差投影
+        x += torch.einsum("blh,lho->blo", x, self.w2) + self.b2.unsqueeze(0)
         return x.view(batch_size, self.n_vit_layer, -1)
 
 
@@ -78,8 +78,8 @@ class ReViTProj(nn.Module):
         """
         batch_size = x.size(0)
 
-        # 第一层反投影 + 激活函数 + 分组标准化
-        x = torch.einsum("ble,leh->blh", x, self.w1) + self.b1.unsqueeze(0)
+        # 第一层残差反投影 + 激活函数 + 分组标准化
+        x += torch.einsum("ble,leh->blh", x, self.w1) + self.b1.unsqueeze(0)
         x = self.act(x)
         x = self.drop(x)
         x = self.gn1(x)  # 输入形状: (batch_size, n_vit_layer, hidden_dim)
@@ -120,11 +120,12 @@ class EmbeddingAndIMGProj(nn.Embedding):
         self.embedding_dim = embedding_dim
         self.img_padding_idx = img_padding_idx
 
+        proj_hidden = 2560
         self.vit_proj = ViTProj(
-            n_vit_layer=n_vit_layer, n_vit_embd=n_vit_embd, n_llm_embd=embedding_dim
+            n_vit_layer=n_vit_layer, n_vit_embd=n_vit_embd, n_llm_embd=embedding_dim, hidden_dim=proj_hidden
         )
         self.vit_reverse_proj = ReViTProj(
-            n_vit_layer=n_vit_layer, n_llm_embd=embedding_dim, n_vit_embd=n_vit_embd
+            n_vit_layer=n_vit_layer, n_llm_embd=embedding_dim, n_vit_embd=n_vit_embd, hidden_dim=proj_hidden
         )
 
         self.register_buffer("model_input", None)
