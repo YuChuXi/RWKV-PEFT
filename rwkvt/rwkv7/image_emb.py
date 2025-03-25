@@ -26,6 +26,7 @@ class ViTProj(nn.Module):
 
         # 添加激活函数和分组标准化
         self.act = nn.GELU()
+        self.drop = nn.Dropout(0.1)
         self.gn1 = nn.GroupNorm(num_groups=n_vit_layer, num_channels=n_vit_layer)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -38,6 +39,7 @@ class ViTProj(nn.Module):
         # 第一层投影 + 激活函数 + 分组标准化
         x = torch.einsum("ble,leh->blh", x, self.w1) + self.b1.unsqueeze(0)
         x = self.act(x)
+        x = self.drop(x)
         x = self.gn1(x)  # 输入形状: (batch_size, n_vit_layer, hidden_dim)
 
         # 第二层投影
@@ -66,6 +68,7 @@ class ReViTProj(nn.Module):
 
         # 添加激活函数和分组标准化
         self.act = nn.GELU()
+        self.drop = nn.Dropout(0.1)
         self.gn1 = nn.GroupNorm(num_groups=n_vit_layer, num_channels=n_vit_layer)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -78,6 +81,7 @@ class ReViTProj(nn.Module):
         # 第一层反投影 + 激活函数 + 分组标准化
         x = torch.einsum("ble,leh->blh", x, self.w1) + self.b1.unsqueeze(0)
         x = self.act(x)
+        x = self.drop(x)
         x = self.gn1(x)  # 输入形状: (batch_size, n_vit_layer, hidden_dim)
 
         # 第二层反投影
