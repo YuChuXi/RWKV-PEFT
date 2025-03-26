@@ -38,12 +38,13 @@ class ViTProj(nn.Module):
 
         # 第一层投影 + 激活函数 + 分组标准化
         x = torch.einsum("ble,leh->blh", x, self.w1) + self.b1.unsqueeze(0)
-        x = self.act(x)
-        x = self.drop(x)
         x = self.gn1(x)  # 输入形状: (batch_size, n_vit_layer, hidden_dim)
+        xn = self.act(x)
+        xn = self.drop(x)
 
         # 第二层残差投影
-        x += torch.einsum("blh,lho->blo", x, self.w2) + self.b2.unsqueeze(0)
+        xn = torch.einsum("blh,lho->blo", x, self.w2) + self.b2.unsqueeze(0)
+        x = x + xn
         return x.view(batch_size, self.n_vit_layer, -1)
 
 
@@ -78,12 +79,13 @@ class ReViTProj(nn.Module):
         """
         batch_size = x.size(0)
 
-        # 第一层残差反投影 + 激活函数 + 分组标准化
-        x += torch.einsum("ble,leh->blh", x, self.w1) + self.b1.unsqueeze(0)
-        x = self.act(x)
-        x = self.drop(x)
-        x = self.gn1(x)  # 输入形状: (batch_size, n_vit_layer, hidden_dim)
-
+        # 第一层反投影 + 激活函数 + 分组标准化 + 残差
+        nx = torch.einsum("ble,leh->blh", x, self.w1) + self.b1.unsqueeze(0)
+        nx = self.gn1(nx)  # 输入形状: (batch_size, n_vit_layer, hidden_dim)
+        nx = self.act(nx)
+        nx = self.drop(nx)
+        x = x + nx
+        
         # 第二层反投影
         x = torch.einsum("blh,lho->blo", x, self.w2) + self.b2.unsqueeze(0)
         return x.view(batch_size, self.n_vit_layer, -1)
@@ -109,8 +111,8 @@ class EmbeddingAndIMGProj(nn.Embedding):
             num_embeddings=num_embeddings,
             embedding_dim=embedding_dim,
             padding_idx=img_padding_idx,
-            device=None,
-            dtype=None,
+            device=device,
+            dtype=dtype,
             **kwargs,
         )
 
