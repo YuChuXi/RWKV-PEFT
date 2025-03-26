@@ -27,6 +27,7 @@ class ViTProj(nn.Module):
         # 添加激活函数和分组标准化
         self.act = nn.GELU()
         self.drop = nn.Dropout(0.1)
+        self.gn0 = nn.GroupNorm(num_groups=n_vit_layer, num_channels=n_vit_layer)
         self.gn1 = nn.GroupNorm(num_groups=n_vit_layer, num_channels=n_vit_layer)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -36,7 +37,9 @@ class ViTProj(nn.Module):
         """
         batch_size = x.size(0)
 
-        # 第一层投影 + 激活函数 + 分组标准化
+        # 第一层投影
+        x = self.gn0(x)
+        x = self.act(x)
         x = torch.einsum("ble,leh->blh", x, self.w1) + self.b1.unsqueeze(0)
         x = self.gn1(x)  # 输入形状: (batch_size, n_vit_layer, hidden_dim)
         xn = self.act(x)
@@ -70,6 +73,7 @@ class ReViTProj(nn.Module):
         # 添加激活函数和分组标准化
         self.act = nn.GELU()
         self.drop = nn.Dropout(0.1)
+        self.gn0 = nn.GroupNorm(num_groups=n_vit_layer, num_channels=n_vit_layer)
         self.gn1 = nn.GroupNorm(num_groups=n_vit_layer, num_channels=n_vit_layer)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -79,7 +83,9 @@ class ReViTProj(nn.Module):
         """
         batch_size = x.size(0)
 
-        # 第一层反投影 + 激活函数 + 分组标准化 + 残差
+        # 第一层残差反投影
+        x = self.gn0(x)
+        x = self.act(x)
         nx = torch.einsum("ble,leh->blh", x, self.w1) + self.b1.unsqueeze(0)
         nx = self.gn1(nx)  # 输入形状: (batch_size, n_vit_layer, hidden_dim)
         nx = self.act(nx)
@@ -282,7 +288,7 @@ class EmbeddingAndIMGProj(nn.Embedding):
         vit_emb_loss = F.mse_loss(model_output, model_input)
 
         total_loss = (
-            vit_recon_loss * 5 + vit_recon_loss_skip_rwkv * 50 + vit_emb_loss * 0.2
+            vit_recon_loss * 5 + vit_recon_loss_skip_rwkv * 5 + vit_emb_loss * 0.2
         )
 
         # # 对比学习损失
