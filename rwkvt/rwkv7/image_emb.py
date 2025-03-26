@@ -273,7 +273,7 @@ class EmbeddingAndIMGProj(nn.Embedding):
         # 最终vit特征
         vit_output = self.decode_vit_features(model_output)  # (total_layers, vit_dim)
         vit_output_skip_rwkv = self.decode_vit_features(
-            model_output
+            model_input
         )  # (total_layers, vit_dim)
 
         # 重建损失计算
