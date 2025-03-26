@@ -119,7 +119,6 @@ else:
             return x.view(batch_size, self.n_vit_layer, -1)
 
 if big_revitproj:
-
     class ReViTProj(nn.Module):
         def __init__(
             self, n_vit_layer: int, n_llm_embd: int, n_vit_embd: int, hidden_dim: int = 2560
@@ -184,6 +183,7 @@ if big_revitproj:
             
             return x.view(batch_size, self.n_vit_layer, -1)
 
+else:
     class ReViTProj(nn.Module):
         def __init__(
             self, n_vit_layer: int, n_llm_embd: int, n_vit_embd: int, hidden_dim: int = 1024
