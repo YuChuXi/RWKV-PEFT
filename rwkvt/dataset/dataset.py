@@ -381,7 +381,6 @@ class MyDataset(Dataset):
                 n_layer = 12
                 while i < x.size(0):
                     if x[i] == 65530 and i + n_layer < x.size(0):
-                        # 直接标记后续24个位置为0
                         
                         # 解码图像ID
                         img_id = 0
@@ -393,12 +392,12 @@ class MyDataset(Dataset):
 
                         try:
                             img[i + 1] = self.image_features[img_id,...]
-                            mask[i + 1 : i + n_layer + 1] = 0
+                            mask[i + 1 : i + n_layer + 1] = 0 # 直接标记后续24个位置为0
                             i += (n_layer + 1)  # 跳过已处理区域
                         except Exception as e:
                             rank_zero_info(f"Warning! image: {img_id} load fail: {e}, skip")
                             print(img_id, x)
-                            mask[i] = 0
+                            mask[i] = 0 # 
                             i += 1
                     else:
                         i += 1
