@@ -15,7 +15,7 @@ if big_vit_proj:
             n_llm_embd: int,
             hidden_dim: int = 1024,
             expansion: int = 4,
-            num_groups: int = 8
+            num_groups: int = 12
         ):
             super().__init__()
             assert hidden_dim == n_llm_embd, "hidden_dim must equal n_llm_embd"
@@ -95,8 +95,8 @@ if big_vit_proj:
             n_llm_embd: int,
             n_vit_embd: int,
             hidden_dim: int = 1024,
-            expansion: int = 2,
-            num_groups: int = 8
+            expansion: int = 4,
+            num_groups: int = 24
         ):
             super().__init__()
             assert hidden_dim == n_llm_embd, "hidden_dim must equal n_llm_embd"
