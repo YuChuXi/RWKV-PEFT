@@ -9,157 +9,132 @@ big_vit_proj = True # FIXME 使用配置
 if big_vit_proj:
     class ViTProj(nn.Module):
         def __init__(
-            self, 
-            n_vit_layer: int,
-            n_vit_embd: int,
-            n_llm_embd: int,
-            hidden_dim: int = 1024,
-            expansion: int = 4,
-            num_groups: int = 12
+            self, n_vit_layer: int, n_vit_embd: int, n_llm_embd: int, hidden_dim: int = 1024
         ):
             super().__init__()
-            assert hidden_dim == n_llm_embd, "hidden_dim must equal n_llm_embd"
             self.n_vit_layer = n_vit_layer
-            self.expansion = expansion
 
-            # 参数结构：动态门控+扩展投影
-            self.w_gate = nn.Parameter(torch.Tensor(n_vit_layer, n_vit_embd, hidden_dim*2))
-            self.w_proj = nn.Parameter(torch.Tensor(n_vit_layer, hidden_dim*2, hidden_dim*expansion))
-            self.w_attn = nn.Parameter(torch.Tensor(n_vit_layer, hidden_dim*expansion, hidden_dim))
-            self.b_gate = nn.Parameter(torch.Tensor(n_vit_layer, hidden_dim*2))
-            self.b_proj = nn.Parameter(torch.Tensor(n_vit_layer, hidden_dim*expansion))
-            self.b_attn = nn.Parameter(torch.Tensor(n_vit_layer, hidden_dim))
+            # 参数堆叠初始化
+            self.w1 = nn.Parameter(torch.Tensor(n_vit_layer, n_vit_embd, hidden_dim))
+            self.w2 = nn.Parameter(torch.Tensor(n_vit_layer, hidden_dim, hidden_dim))  # 保持维度
+            self.w3 = nn.Parameter(torch.Tensor(n_vit_layer, hidden_dim, n_llm_embd))  # 最终投影
+            self.b1 = nn.Parameter(torch.Tensor(n_vit_layer, hidden_dim))
+            self.b2 = nn.Parameter(torch.Tensor(n_vit_layer, hidden_dim))
+            self.b3 = nn.Parameter(torch.Tensor(n_vit_layer, n_llm_embd))
 
-            # 跨层注意力机制
-            self.layer_attn = nn.MultiheadAttention(
-                embed_dim=hidden_dim,
-                num_heads=8,
-                dropout=0.1,
-                batch_first=True
-            )
+            # 参数初始化
+            nn.init.kaiming_normal_(self.w1, mode="fan_in", nonlinearity="linear")
+            nn.init.kaiming_normal_(self.w2, mode="fan_in", nonlinearity="linear")
+            nn.init.kaiming_normal_(self.w3, mode="fan_in", nonlinearity="linear")
+            nn.init.zeros_(self.b1)
+            nn.init.zeros_(self.b2)
+            nn.init.zeros_(self.b3)
 
-            # 归一化层优化
-            self.gn_input = nn.GroupNorm(min(num_groups, n_vit_layer), n_vit_layer)
-            self.gn_hidden = nn.GroupNorm(min(num_groups, n_vit_layer), n_vit_layer)
-            self.ln_output = nn.LayerNorm(hidden_dim)
-
-            # 激活与正则化
+            # 激活函数和正则化
             self.act = nn.GELU()
             self.drop = nn.Dropout(0.1)
+            self.gn0 = nn.GroupNorm(num_groups=n_vit_layer, num_channels=n_vit_layer)
+            self.gn1 = nn.GroupNorm(num_groups=n_vit_layer, num_channels=n_vit_layer)
+            self.gn2 = nn.GroupNorm(num_groups=n_vit_layer, num_channels=n_vit_layer)
             
-            # 初始化
-            for w in [self.w_gate, self.w_proj, self.w_attn]:
-                nn.init.kaiming_normal_(w, mode='fan_in', nonlinearity='linear')
-            for b in [self.b_gate, self.b_proj, self.b_attn]:
-                nn.init.zeros_(b)
+            # 添加跨层自注意力
+            self.attn = nn.MultiheadAttention(
+                embed_dim=hidden_dim,
+                num_heads=4,
+                batch_first=True,
+                dropout=0.1
+            )
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
-            """
-            输入形状: (B, L, E_vit)
-            输出形状: (B, L, E_llm)
-            """
-            B, L, _ = x.shape
+            batch_size = x.size(0)
             
-            # 输入归一化
-            x = self.gn_input(x)
+            # 输入归一化与激活
+            x = self.gn0(x)
+            x = self.act(x)
             
-            # 动态门控投影
-            gate = torch.einsum('ble,leh->blh', x, self.w_gate) + self.b_gate.unsqueeze(0)
-            gate, x_proj = torch.chunk(gate, 2, dim=-1)
-            gate = torch.sigmoid(gate)
-            x = x_proj * gate
+            # 第一层投影
+            x = torch.einsum("ble,leh->blh", x, self.w1) + self.b1.unsqueeze(0)
             
-            # 扩展投影
-            x = self.act(torch.einsum('blh,leh->blh', x, self.w_proj) + self.b_proj.unsqueeze(0))
-            x = self.gn_hidden(x)
+            # 跨层注意力（处理层间交互）
+            attn_out, _ = self.attn(x, x, x)
+            x = x + attn_out  # 残差连接
+            x = self.gn1(x)
+            x = self.act(x)
+            
+            # 第二层投影（保持维度）
+            x = torch.einsum("blh,lhe->ble", x, self.w2) + self.b2.unsqueeze(0)
             x = self.drop(x)
+            x = self.gn2(x)
             
-            # 跨层注意力
-            x_attn, _ = self.layer_attn(
-                x.view(B*L, 1, -1), 
-                x.view(B*L, 1, -1),
-                x.view(B*L, 1, -1)
-            )
-            x = x + x_attn.view(B, L, -1)
+            # 最终投影到目标维度
+            x = torch.einsum("ble,leh->blh", x, self.w3) + self.b3.unsqueeze(0)
             
-            # 压缩投影
-            x = self.ln_output(
-                torch.einsum('blh,leh->blh', x, self.w_attn) + self.b_attn.unsqueeze(0)
-            )
-            return x
+            return x.view(batch_size, self.n_vit_layer, -1)
+
 
     class ReViTProj(nn.Module):
         def __init__(
-            self,
-            n_vit_layer: int,
-            n_llm_embd: int,
-            n_vit_embd: int,
-            hidden_dim: int = 1024,
-            expansion: int = 4,
-            num_groups: int = 24
+            self, n_vit_layer: int, n_llm_embd: int, n_vit_embd: int, hidden_dim: int = 1024
         ):
             super().__init__()
-            assert hidden_dim == n_llm_embd, "hidden_dim must equal n_llm_embd"
             self.n_vit_layer = n_vit_layer
-            
-            # 逆向投影参数
-            self.w1 = nn.Parameter(torch.Tensor(n_vit_layer, n_llm_embd, hidden_dim*expansion))
-            self.w2 = nn.Parameter(torch.Tensor(n_vit_layer, hidden_dim*expansion, hidden_dim))
-            self.w3 = nn.Parameter(torch.Tensor(n_vit_layer, hidden_dim, n_vit_embd))
-            self.b1 = nn.Parameter(torch.Tensor(n_vit_layer, hidden_dim*expansion))
+
+            # 参数堆叠初始化
+            self.w1 = nn.Parameter(torch.Tensor(n_vit_layer, n_llm_embd, hidden_dim))
+            self.w2 = nn.Parameter(torch.Tensor(n_vit_layer, hidden_dim, hidden_dim))  # 保持维度
+            self.w3 = nn.Parameter(torch.Tensor(n_vit_layer, hidden_dim, n_vit_embd))  # 最终投影
+            self.b1 = nn.Parameter(torch.Tensor(n_vit_layer, hidden_dim))
             self.b2 = nn.Parameter(torch.Tensor(n_vit_layer, hidden_dim))
             self.b3 = nn.Parameter(torch.Tensor(n_vit_layer, n_vit_embd))
 
-            # 深度可分离卷积增强局部性
-            self.depth_conv = nn.Conv1d(
-                in_channels=n_vit_layer,
-                out_channels=n_vit_layer,
-                kernel_size=3,
-                padding=1,
-                groups=n_vit_layer
-            )
-            
-            # 归一化层
-            self.gn1 = nn.GroupNorm(min(num_groups, n_vit_layer), n_vit_layer)
-            self.gn2 = nn.GroupNorm(min(num_groups, n_vit_layer), n_vit_layer)
-            self.ln = nn.LayerNorm(n_vit_embd)
-            
-            # 激活与正则化
-            self.act = nn.SiLU()  # 实验性激活函数
+            # 参数初始化
+            nn.init.kaiming_normal_(self.w1, mode="fan_in", nonlinearity="linear")
+            nn.init.kaiming_normal_(self.w2, mode="fan_in", nonlinearity="linear")
+            nn.init.kaiming_normal_(self.w3, mode="fan_in", nonlinearity="linear")
+            nn.init.zeros_(self.b1)
+            nn.init.zeros_(self.b2)
+            nn.init.zeros_(self.b3)
+
+            # 激活函数和正则化
+            self.act = nn.GELU()
             self.drop = nn.Dropout(0.1)
+            self.gn0 = nn.GroupNorm(num_groups=n_vit_layer, num_channels=n_vit_layer)
+            self.gn1 = nn.GroupNorm(num_groups=n_vit_layer, num_channels=n_vit_layer)
+            self.gn2 = nn.GroupNorm(num_groups=n_vit_layer, num_channels=n_vit_layer)
             
-            # 初始化
-            for w in [self.w1, self.w2, self.w3]:
-                nn.init.kaiming_normal_(w, mode='fan_in', nonlinearity='linear')
-            for b in [self.b1, self.b2, self.b3]:
-                nn.init.zeros_(b)
+            # 添加跨层自注意力
+            self.attn = nn.MultiheadAttention(
+                embed_dim=hidden_dim,
+                num_heads=4,
+                batch_first=True,
+                dropout=0.1
+            )
 
         def forward(self, x: torch.Tensor) -> torch.Tensor:
-            """
-            输入形状: (B, L, E_llm)
-            输出形状: (B, L, E_vit)
-            """
-            # 第一阶段投影
-            x = self.act(
-                torch.einsum('ble,leh->blh', x, self.w1) + self.b1.unsqueeze(0)
-            )
+            batch_size = x.size(0)
+            
+            # 输入归一化与激活
+            x = self.gn0(x)
+            x = self.act(x)
+            
+            # 第一层投影
+            x = torch.einsum("ble,leh->blh", x, self.w1) + self.b1.unsqueeze(0)
+            
+            # 跨层注意力（处理层间交互）
+            attn_out, _ = self.attn(x, x, x)
+            x = x + attn_out  # 残差连接
             x = self.gn1(x)
+            x = self.act(x)
             
-            # 深度卷积增强
-            x = x + self.depth_conv(x.transpose(1,2)).transpose(1,2)
-            
-            # 第二阶段投影
-            x = self.act(
-                torch.einsum('blh,leh->blh', x, self.w2) + self.b2.unsqueeze(0)
-            )
-            x = self.gn2(x)
+            # 第二层投影（保持维度）
+            x = torch.einsum("blh,lhe->ble", x, self.w2) + self.b2.unsqueeze(0)
             x = self.drop(x)
+            x = self.gn2(x)
             
-            # 最终投影
-            x = self.ln(
-                torch.einsum('blh,leh->ble', x, self.w3) + self.b3.unsqueeze(0)
-            )
-            return x
+            # 最终投影到目标维度
+            x = torch.einsum("ble,leh->blh", x, self.w3) + self.b3.unsqueeze(0)
+            
+            return x.view(batch_size, self.n_vit_layer, -1)
 
 else:
     class ViTProj(nn.Module):
@@ -282,7 +257,7 @@ class EmbeddingAndIMGProj(nn.Embedding):
         self.embedding_dim = embedding_dim
         self.img_padding_idx = img_padding_idx
 
-        proj_hidden = 2560
+        proj_hidden = 1024
         self.vit_proj = ViTProj(
             n_vit_layer=n_vit_layer,
             n_vit_embd=n_vit_embd,
