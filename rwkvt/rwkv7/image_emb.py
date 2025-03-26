@@ -116,7 +116,6 @@ class EmbeddingAndIMGProj(nn.Embedding):
             **kwargs,
         )
 
-
         self.n_vit_layer = n_vit_layer
         self.n_vit_embd = n_vit_embd
         self.embedding_dim = embedding_dim
@@ -124,10 +123,16 @@ class EmbeddingAndIMGProj(nn.Embedding):
 
         proj_hidden = 2560
         self.vit_proj = ViTProj(
-            n_vit_layer=n_vit_layer, n_vit_embd=n_vit_embd, n_llm_embd=embedding_dim, hidden_dim=proj_hidden
+            n_vit_layer=n_vit_layer,
+            n_vit_embd=n_vit_embd,
+            n_llm_embd=embedding_dim,
+            hidden_dim=proj_hidden,
         )
         self.vit_reverse_proj = ReViTProj(
-            n_vit_layer=n_vit_layer, n_llm_embd=embedding_dim, n_vit_embd=n_vit_embd, hidden_dim=proj_hidden
+            n_vit_layer=n_vit_layer,
+            n_llm_embd=embedding_dim,
+            n_vit_embd=n_vit_embd,
+            hidden_dim=proj_hidden,
         )
 
         self.register_buffer("model_input", None)
@@ -267,12 +272,18 @@ class EmbeddingAndIMGProj(nn.Embedding):
 
         # 最终vit特征
         vit_output = self.decode_vit_features(model_output)  # (total_layers, vit_dim)
+        vit_output_skip_rwkv = self.decode_vit_features(
+            model_output
+        )  # (total_layers, vit_dim)
 
         # 重建损失计算
         vit_recon_loss = F.l1_loss(vit_output, vit_input)  # 值太小
+        vit_recon_loss_skip_rwkv = F.l1_loss(vit_output_skip_rwkv, vit_input)  # 值太小
         vit_emb_loss = F.mse_loss(model_output, model_input)
 
-        total_loss = vit_recon_loss * 10 + vit_emb_loss * 0.2
+        total_loss = (
+            vit_recon_loss * 5 + vit_recon_loss_skip_rwkv * 50 + vit_emb_loss * 0.2
+        )
 
         # # 对比学习损失
         # norm_recon = F.normalize(reconstructed[valid_mask], dim=-1)
@@ -290,6 +301,7 @@ class EmbeddingAndIMGProj(nn.Embedding):
         return total_loss, {
             "vit_total_loss": total_loss.detach(),
             "vit_recon_loss": vit_recon_loss.detach(),
+            "vit_recon_loss_skip_rwkv": vit_recon_loss_skip_rwkv.detach(),
             "vit_emb_loss": vit_emb_loss.detach(),
         }
 
