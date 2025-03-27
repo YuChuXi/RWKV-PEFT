@@ -39,7 +39,7 @@ class ViTProj(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """ 输入形状: (b, l, e_vit), 输出形状: (b, l, e_llm) """
         # 残差路径投影
-        res = torch.einsum("ble,leh->blo", x, self.w_res) + self.b_res.unsqueeze(0)
+        res = torch.einsum("ble,leh->blh", x, self.w_res) + self.b_res.unsqueeze(0)
         
         # 主路径处理
         # 第一层投影
@@ -92,7 +92,7 @@ class ReViTProj(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """ 输入形状: (b, l, e_llm), 输出形状: (b, l, e_vit) """
         # 残差路径投影
-        res = torch.einsum("ble,leh->blo", x, self.w_res) + self.b_res.unsqueeze(0)
+        res = torch.einsum("ble,leh->blh", x, self.w_res) + self.b_res.unsqueeze(0)
         
         # 主路径处理
         # 第一层反投影
