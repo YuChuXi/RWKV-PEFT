@@ -3,57 +3,33 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import List, Dict, Optional
+
 class ViTProj(nn.Module):
     def __init__(
         self,
         n_vit_layer: int,
         n_vit_embd: int,
         n_llm_embd: int,
-        hidden_dim: int = 1024,
     ):
         super().__init__()
         self.n_vit_layer = n_vit_layer
 
         # 主路径参数
-        self.w1 = nn.Parameter(torch.Tensor(n_vit_layer, n_vit_embd, hidden_dim))
-        self.w2 = nn.Parameter(torch.Tensor(n_vit_layer, hidden_dim, n_llm_embd))
-        self.b1 = nn.Parameter(torch.Tensor(n_vit_layer, hidden_dim))
-        self.b2 = nn.Parameter(torch.Tensor(n_vit_layer, n_llm_embd))
+        self.w1 = nn.Parameter(torch.Tensor(n_vit_layer, n_vit_embd, n_llm_embd))
+        self.b1 = nn.Parameter(torch.Tensor(n_vit_layer, n_llm_embd))
 
-        # 残差路径参数（新增）
-        self.w_res = nn.Parameter(torch.Tensor(n_vit_layer, n_vit_embd, n_llm_embd))
-        self.b_res = nn.Parameter(torch.Tensor(n_vit_layer, n_llm_embd))
-
-        # 参数初始化
-        for w in [self.w1, self.w2, self.w_res]:
-            nn.init.kaiming_normal_(w, mode="fan_in", nonlinearity="linear")
-        for b in [self.b1, self.b2, self.b_res]:
-            nn.init.zeros_(b)
-
-        # 标准化层调整分组数（保持每个层独立归一化）
         self.gn1 = nn.GroupNorm(num_groups=n_vit_layer, num_channels=n_vit_layer)
-        self.gn2 = nn.GroupNorm(num_groups=n_vit_layer, num_channels=n_vit_layer)
         self.act = nn.GELU()
         self.drop = nn.Dropout(0.1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """ 输入形状: (b, l, e_vit), 输出形状: (b, l, e_llm) """
-        # 残差路径投影
-        res = torch.einsum("ble,leh->blh", x, self.w_res) + self.b_res.unsqueeze(0)
-        
-        # 主路径处理
         # 第一层投影
         x = torch.einsum("ble,leh->blh", x, self.w1) + self.b1.unsqueeze(0)
-        x = self.gn1(x)  # 形状保持(b, l, h)
+        x = self.gn1(x)
         x = self.act(x)
         x = self.drop(x)
-        
-        # 第二层投影
-        x = torch.einsum("blh,lho->blo", x, self.w2) + self.b2.unsqueeze(0)
-        x = self.gn2(x)  # 形状变为(b, l, e_llm)
-        
-        # 合并残差
-        return res + x
+        return x
 
 
 class ReViTProj(nn.Module):
@@ -62,51 +38,29 @@ class ReViTProj(nn.Module):
         n_vit_layer: int,
         n_llm_embd: int,
         n_vit_embd: int,
-        hidden_dim: int = 1024,
     ):
         super().__init__()
         self.n_vit_layer = n_vit_layer
 
         # 主路径参数
-        self.w1 = nn.Parameter(torch.Tensor(n_vit_layer, n_llm_embd, hidden_dim))
-        self.w2 = nn.Parameter(torch.Tensor(n_vit_layer, hidden_dim, n_vit_embd))
-        self.b1 = nn.Parameter(torch.Tensor(n_vit_layer, hidden_dim))
-        self.b2 = nn.Parameter(torch.Tensor(n_vit_layer, n_vit_embd))
+        self.w1 = nn.Parameter(torch.Tensor(n_vit_layer, n_llm_embd, n_vit_embd))
+        self.b1 = nn.Parameter(torch.Tensor(n_vit_layer, n_vit_embd))
 
-        # 残差路径参数（新增）
-        self.w_res = nn.Parameter(torch.Tensor(n_vit_layer, n_llm_embd, n_vit_embd))
-        self.b_res = nn.Parameter(torch.Tensor(n_vit_layer, n_vit_embd))
-
-        # 参数初始化
-        for w in [self.w1, self.w2, self.w_res]:
-            nn.init.kaiming_normal_(w, mode="fan_in", nonlinearity="linear")
-        for b in [self.b1, self.b2, self.b_res]:
-            nn.init.zeros_(b)
+        nn.init.kaiming_normal_(self.w1, mode="fan_in", nonlinearity="linear")
+        nn.init.zeros_(self.b1)
 
         # 标准化层调整分组数
         self.gn1 = nn.GroupNorm(num_groups=n_vit_layer, num_channels=n_vit_layer)
-        self.gn2 = nn.GroupNorm(num_groups=n_vit_layer, num_channels=n_vit_layer)
         self.act = nn.GELU()
         self.drop = nn.Dropout(0.1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """ 输入形状: (b, l, e_llm), 输出形状: (b, l, e_vit) """
-        # 残差路径投影
-        res = torch.einsum("ble,leh->blh", x, self.w_res) + self.b_res.unsqueeze(0)
-        
-        # 主路径处理
-        # 第一层反投影
-        x = torch.einsum("ble,leh->blh", x, self.w1) + self.b1.unsqueeze(0)
-        x = self.gn1(x)  # 形状保持(b, l, h)
+        x = self.gn1(x)
         x = self.act(x)
+        x = torch.einsum("ble,leh->blh", x, self.w1) + self.b1.unsqueeze(0)
         x = self.drop(x)
-        
-        # 第二层反投影
-        x = torch.einsum("blh,lho->blo", x, self.w2) + self.b2.unsqueeze(0)
-        x = self.gn2(x)  # 形状变为(b, l, e_vit)
-        
-        # 合并残差
-        return res + x
+        return x
 
 class EmbeddingAndIMGProj(nn.Embedding):
     def __init__(
@@ -138,18 +92,15 @@ class EmbeddingAndIMGProj(nn.Embedding):
         self.embedding_dim = embedding_dim
         self.img_padding_idx = img_padding_idx
 
-        proj_hidden = 1024
         self.vit_proj = ViTProj(
             n_vit_layer=n_vit_layer,
             n_vit_embd=n_vit_embd,
             n_llm_embd=embedding_dim,
-            hidden_dim=proj_hidden,
         )
         self.vit_reverse_proj = ReViTProj(
             n_vit_layer=n_vit_layer,
             n_llm_embd=embedding_dim,
             n_vit_embd=n_vit_embd,
-            hidden_dim=proj_hidden,
         )
 
         self.register_buffer("model_input", None)
