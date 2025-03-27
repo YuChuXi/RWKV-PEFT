@@ -3,126 +3,110 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from typing import List, Dict, Optional
-
-big_vitproj = False # FIXME 使用配置
-big_revitproj = True
 class ViTProj(nn.Module):
     def __init__(
-        self, n_vit_layer: int, n_vit_embd: int, n_llm_embd: int, hidden_dim: int = 1024
+        self,
+        n_vit_layer: int,
+        n_vit_embd: int,
+        n_llm_embd: int,
+        hidden_dim: int = 1024,
     ):
         super().__init__()
         self.n_vit_layer = n_vit_layer
 
-        # 参数矩阵扩展为分层结构
+        # 主路径参数
         self.w1 = nn.Parameter(torch.Tensor(n_vit_layer, n_vit_embd, hidden_dim))
         self.w2 = nn.Parameter(torch.Tensor(n_vit_layer, hidden_dim, n_llm_embd))
         self.b1 = nn.Parameter(torch.Tensor(n_vit_layer, hidden_dim))
         self.b2 = nn.Parameter(torch.Tensor(n_vit_layer, n_llm_embd))
 
-        # 残差缩放系数 (LayerScale)
-        self.ls = nn.Parameter(torch.ones(n_vit_layer, 1, 1))
+        # 残差路径参数（新增）
+        self.w_res = nn.Parameter(torch.Tensor(n_vit_layer, n_vit_embd, n_llm_embd))
+        self.b_res = nn.Parameter(torch.Tensor(n_vit_layer, n_llm_embd))
 
-        # 动态分组归一化配置
-        gn_groups = min(8, n_vit_layer)
-        if n_vit_layer % gn_groups != 0:
-            gn_groups = 1  # 退化为LayerNorm
-        self.gn0 = nn.GroupNorm(gn_groups, n_vit_layer)
-        self.gn1 = nn.GroupNorm(gn_groups, n_vit_layer)
+        # 参数初始化
+        for w in [self.w1, self.w2, self.w_res]:
+            nn.init.kaiming_normal_(w, mode="fan_in", nonlinearity="linear")
+        for b in [self.b1, self.b2, self.b_res]:
+            nn.init.zeros_(b)
 
-        # 层间交互注意力
-        self.layer_attn = nn.MultiheadAttention(
-            embed_dim=hidden_dim,
-            num_heads=4,
-            batch_first=True,
-            dropout=0.1
-        )
-
+        # 标准化层调整分组数（保持每个层独立归一化）
+        self.gn1 = nn.GroupNorm(num_groups=n_vit_layer, num_channels=n_vit_layer)
+        self.gn2 = nn.GroupNorm(num_groups=n_vit_layer, num_channels=n_vit_layer)
         self.act = nn.GELU()
         self.drop = nn.Dropout(0.1)
 
-        # 参数初始化
-        nn.init.kaiming_normal_(self.w1, mode="fan_in", nonlinearity="linear")
-        nn.init.kaiming_normal_(self.w2, mode="fan_in", nonlinearity="linear")
-        nn.init.zeros_(self.b1)
-        nn.init.zeros_(self.b2)
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # 初始投影
-        x = self.gn0(x)
-        x = self.act(x)
+        """ 输入形状: (b, l, e_vit), 输出形状: (b, l, e_llm) """
+        # 残差路径投影
+        res = torch.einsum("ble,leh->blo", x, self.w_res) + self.b_res.unsqueeze(0)
+        
+        # 主路径处理
+        # 第一层投影
         x = torch.einsum("ble,leh->blh", x, self.w1) + self.b1.unsqueeze(0)
+        x = self.gn1(x)  # 形状保持(b, l, h)
+        x = self.act(x)
+        x = self.drop(x)
         
-        # 层间特征交互
-        attn_out, _ = self.layer_attn(x, x, x)
-        x = x + attn_out
+        # 第二层投影
+        x = torch.einsum("blh,lho->blo", x, self.w2) + self.b2.unsqueeze(0)
+        x = self.gn2(x)  # 形状变为(b, l, e_llm)
+        
+        # 合并残差
+        return res + x
 
-        # 残差变换路径
-        x = self.gn1(x)
-        xn = self.act(x)
-        xn = self.drop(xn)
-        xn = torch.einsum("blh,lho->blo", xn, self.w2) + self.b2.unsqueeze(0)
-        
-        # 自适应残差缩放
-        return x + self.ls * xn
 
 class ReViTProj(nn.Module):
     def __init__(
-        self, n_vit_layer: int, n_llm_embd: int, n_vit_embd: int, hidden_dim: int = 1024
+        self,
+        n_vit_layer: int,
+        n_llm_embd: int,
+        n_vit_embd: int,
+        hidden_dim: int = 1024,
     ):
         super().__init__()
         self.n_vit_layer = n_vit_layer
 
-        # 逆向投影参数
+        # 主路径参数
         self.w1 = nn.Parameter(torch.Tensor(n_vit_layer, n_llm_embd, hidden_dim))
         self.w2 = nn.Parameter(torch.Tensor(n_vit_layer, hidden_dim, n_vit_embd))
         self.b1 = nn.Parameter(torch.Tensor(n_vit_layer, hidden_dim))
         self.b2 = nn.Parameter(torch.Tensor(n_vit_layer, n_vit_embd))
 
-        # 残差控制参数
-        self.ls = nn.Parameter(torch.ones(n_vit_layer, 1, 1))
+        # 残差路径参数（新增）
+        self.w_res = nn.Parameter(torch.Tensor(n_vit_layer, n_llm_embd, n_vit_embd))
+        self.b_res = nn.Parameter(torch.Tensor(n_vit_layer, n_vit_embd))
 
-        # 动态分组配置
-        gn_groups = min(8, n_vit_layer)
-        if n_vit_layer % gn_groups != 0:
-            gn_groups = 1
-        self.gn0 = nn.GroupNorm(gn_groups, n_vit_layer)
-        self.gn1 = nn.GroupNorm(gn_groups, n_vit_layer)
+        # 参数初始化
+        for w in [self.w1, self.w2, self.w_res]:
+            nn.init.kaiming_normal_(w, mode="fan_in", nonlinearity="linear")
+        for b in [self.b1, self.b2, self.b_res]:
+            nn.init.zeros_(b)
 
-        # 特征交互模块
-        self.layer_attn = nn.MultiheadAttention(
-            embed_dim=hidden_dim,
-            num_heads=4,
-            batch_first=True,
-            dropout=0.1
-        )
-
+        # 标准化层调整分组数
+        self.gn1 = nn.GroupNorm(num_groups=n_vit_layer, num_channels=n_vit_layer)
+        self.gn2 = nn.GroupNorm(num_groups=n_vit_layer, num_channels=n_vit_layer)
         self.act = nn.GELU()
         self.drop = nn.Dropout(0.1)
 
-        # 参数初始化
-        nn.init.kaiming_normal_(self.w1, mode="fan_in", nonlinearity="linear")
-        nn.init.kaiming_normal_(self.w2, mode="fan_in", nonlinearity="linear")
-        nn.init.zeros_(self.b1)
-        nn.init.zeros_(self.b2)
-
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # 特征预处理
-        x = self.gn0(x)
-        x = self.act(x)
-        x = torch.einsum("ble,leh->blh", x, self.w1) + self.b1.unsqueeze(0)
-
-        # 跨层特征增强
-        attn_out, _ = self.layer_attn(x, x, x)
-        x = x + attn_out
-
-        # 残差重建路径
-        x = self.gn1(x)
-        xn = self.act(x)
-        xn = self.drop(xn)
-        xn = torch.einsum("blh,lho->blo", xn, self.w2) + self.b2.unsqueeze(0)
+        """ 输入形状: (b, l, e_llm), 输出形状: (b, l, e_vit) """
+        # 残差路径投影
+        res = torch.einsum("ble,leh->blo", x, self.w_res) + self.b_res.unsqueeze(0)
         
-        # 自适应特征融合
-        return x + self.ls * xn
+        # 主路径处理
+        # 第一层反投影
+        x = torch.einsum("ble,leh->blh", x, self.w1) + self.b1.unsqueeze(0)
+        x = self.gn1(x)  # 形状保持(b, l, h)
+        x = self.act(x)
+        x = self.drop(x)
+        
+        # 第二层反投影
+        x = torch.einsum("blh,lho->blo", x, self.w2) + self.b2.unsqueeze(0)
+        x = self.gn2(x)  # 形状变为(b, l, e_vit)
+        
+        # 合并残差
+        return res + x
 
 class EmbeddingAndIMGProj(nn.Embedding):
     def __init__(
