@@ -5,69 +5,97 @@ import torch.nn.functional as F
 from typing import List, Dict, Optional
 
 
+class LayerwiseGroupNorm(nn.Module):
+    def __init__(self, num_layers: int, num_cannels: int, eps: float = 1e-5):
+        super().__init__()
+        self.num_layers = num_layers
+        self.num_cannels = num_cannels
+        self.eps = eps
+        # 每个层有独立的缩放和偏移参数
+        self.weight = nn.Parameter(torch.ones(num_layers, 1))
+        self.bias = nn.Parameter(torch.zeros(num_layers, 1))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        batch, layer, cannels = x.shape
+        # 调整维度为 (layer, batch * cannels)
+        x_reshaped = x.permute(1, 0, 2).contiguous().view(layer, -1)
+        # 计算均值和方差
+        mean = x_reshaped.mean(dim=1, keepdim=True)
+        var = x_reshaped.var(dim=1, keepdim=True, unbiased=False)
+        # 标准化
+        x_normalized = (x_reshaped - mean) / torch.sqrt(var + self.eps)
+        # 应用缩放和偏移
+        x_normalized = x_normalized * self.weight + self.bias
+        # 恢复原始形状
+        x_out = x_normalized.view(layer, batch, cannels).permute(1, 0, 2)
+        return x_out
+    
+
+
 class BaseProjector(nn.Module):
     """投影基类（正向/反向共享结构）"""
+
     def __init__(self, n_layers, in_dim, out_dim, hidden_dim=1024, reverse=False):
         super().__init__()
         self.n_layers = n_layers
         self.reverse = reverse
-        
+
         # 投影参数定义
         self.w1 = nn.Parameter(torch.Tensor(n_layers, in_dim, hidden_dim))
         self.w2 = nn.Parameter(torch.Tensor(n_layers, hidden_dim, out_dim))
-        self.w_shortcut = nn.Parameter(torch.Tensor(n_layers, in_dim, out_dim))
-        
+
         # 偏置项
         self.b1 = nn.Parameter(torch.zeros(n_layers, hidden_dim))
         self.b2 = nn.Parameter(torch.zeros(n_layers, out_dim))
         self.b_shortcut = nn.Parameter(torch.zeros(n_layers, out_dim))
 
         # 初始化参数
-        nn.init.kaiming_normal_(self.w1, mode='fan_in', nonlinearity='gelu')
-        nn.init.kaiming_normal_(self.w2, mode='fan_in', nonlinearity='linear')
-        nn.init.kaiming_normal_(self.w_shortcut, mode='fan_in', nonlinearity='linear')
-        
+        nn.init.kaiming_normal_(self.w1, mode="fan_in", nonlinearity="relu")
+        nn.init.kaiming_normal_(self.w2, mode="fan_in", nonlinearity="linear")
+
         # 共享网络组件
-        self.act = nn.GELU()
-        self.drop = nn.Dropout(0.1)
-        self.norm = nn.LayerNorm(hidden_dim)  # 更稳定的层归一化
-        self.norm2 = nn.LayerNorm(hidden_dim)  # 更稳定的层归一化
+        self.act = nn.ReLU()
+        self.drop = nn.Dropout(0.0)
+        self.norm = LayerwiseGroupNorm(n_layers, out_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # 残差捷径分支
-        shortcut = torch.einsum("ble,leh->blh", x, self.w_shortcut) + self.b_shortcut.unsqueeze(0)
-        
         # 主分支处理流程
         x = torch.einsum("ble,leh->blh", x, self.w1) + self.b1.unsqueeze(0)
-        x = self.norm(x)       # 先归一化提升稳定性
-        x = self.act(x)        # 后接激活函数
+        x = self.act(x)  # 后接激活函数
         x = self.drop(x)
         x = torch.einsum("blh,lho->blo", x, self.w2) + self.b2.unsqueeze(0)
-        x = x + shortcut # 残差连接增强梯度流
-        # 特征融合
-        return x + self.norm2(x) # 特征增强
+        return x + self.norm(x)  # 特征增强
+
 
 class ViTProj(BaseProjector):
     """视觉特征投影（ViT->LLM）"""
-    def __init__(self, n_vit_layer: int, n_vit_embd: int, n_llm_embd: int, hidden_dim: int = 1024):
+
+    def __init__(
+        self, n_vit_layer: int, n_vit_embd: int, n_llm_embd: int, hidden_dim: int = 1024
+    ):
         super().__init__(
             n_layers=n_vit_layer,
             in_dim=n_vit_embd,
             out_dim=n_llm_embd,
             hidden_dim=hidden_dim,
-            reverse=False
+            reverse=False,
         )
+
 
 class ReViTProj(BaseProjector):
     """逆向特征投影（LLM->ViT）"""
-    def __init__(self, n_vit_layer: int, n_llm_embd: int, n_vit_embd: int, hidden_dim: int = 1024):
+
+    def __init__(
+        self, n_vit_layer: int, n_llm_embd: int, n_vit_embd: int, hidden_dim: int = 1024
+    ):
         super().__init__(
             n_layers=n_vit_layer,
             in_dim=n_llm_embd,
             out_dim=n_vit_embd,
             hidden_dim=hidden_dim,
-            reverse=True
+            reverse=True,
         )
+
 
 class EmbeddingAndIMGProj(nn.Embedding):
     def __init__(
@@ -103,11 +131,13 @@ class EmbeddingAndIMGProj(nn.Embedding):
             n_vit_layer=n_vit_layer,
             n_vit_embd=n_vit_embd,
             n_llm_embd=embedding_dim,
+            hidden_dim=embedding_dim,
         )
         self.vit_reverse_proj = ReViTProj(
             n_vit_layer=n_vit_layer,
             n_llm_embd=embedding_dim,
             n_vit_embd=n_vit_embd,
+            hidden_dim=embedding_dim,
         )
 
         self.register_buffer("model_input", None)
