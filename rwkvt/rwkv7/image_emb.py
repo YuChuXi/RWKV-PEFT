@@ -4,63 +4,70 @@ import torch.nn as nn
 import torch.nn.functional as F
 from typing import List, Dict, Optional
 
-class ViTProj(nn.Module):
-    def __init__(
-        self,
-        n_vit_layer: int,
-        n_vit_embd: int,
-        n_llm_embd: int,
-    ):
+
+class BaseProjector(nn.Module):
+    """投影基类（正向/反向共享结构）"""
+    def __init__(self, n_layers, in_dim, out_dim, hidden_dim=1024, reverse=False):
         super().__init__()
-        self.n_vit_layer = n_vit_layer
+        self.n_layers = n_layers
+        self.reverse = reverse
+        
+        # 投影参数定义
+        self.w1 = nn.Parameter(torch.Tensor(n_layers, in_dim, hidden_dim))
+        self.w2 = nn.Parameter(torch.Tensor(n_layers, hidden_dim, out_dim))
+        self.w_shortcut = nn.Parameter(torch.Tensor(n_layers, in_dim, out_dim))
+        
+        # 偏置项
+        self.b1 = nn.Parameter(torch.zeros(n_layers, hidden_dim))
+        self.b2 = nn.Parameter(torch.zeros(n_layers, out_dim))
+        self.b_shortcut = nn.Parameter(torch.zeros(n_layers, out_dim))
 
-        # 主路径参数
-        self.w1 = nn.Parameter(torch.Tensor(n_vit_layer, n_vit_embd, n_llm_embd))
-        self.b1 = nn.Parameter(torch.Tensor(n_vit_layer, n_llm_embd))
-
-        self.gn1 = nn.GroupNorm(num_groups=n_vit_layer, num_channels=n_vit_layer)
+        # 初始化参数
+        nn.init.kaiming_normal_(self.w1, mode='fan_in', nonlinearity='gelu')
+        nn.init.kaiming_normal_(self.w2, mode='fan_in', nonlinearity='linear')
+        nn.init.kaiming_normal_(self.w_shortcut, mode='fan_in', nonlinearity='linear')
+        
+        # 共享网络组件
         self.act = nn.GELU()
         self.drop = nn.Dropout(0.1)
+        self.norm = nn.LayerNorm(hidden_dim)  # 更稳定的层归一化
+        self.norm2 = nn.LayerNorm(hidden_dim)  # 更稳定的层归一化
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """ 输入形状: (b, l, e_vit), 输出形状: (b, l, e_llm) """
-        # 第一层投影
+        # 残差捷径分支
+        shortcut = torch.einsum("ble,leh->blh", x, self.w_shortcut) + self.b_shortcut.unsqueeze(0)
+        
+        # 主分支处理流程
         x = torch.einsum("ble,leh->blh", x, self.w1) + self.b1.unsqueeze(0)
-        x = self.gn1(x)
-        x = self.act(x)
+        x = self.norm(x)       # 先归一化提升稳定性
+        x = self.act(x)        # 后接激活函数
         x = self.drop(x)
-        return x
+        x = torch.einsum("blh,lho->blo", x, self.w2) + self.b2.unsqueeze(0)
+        x = x + shortcut # 残差连接增强梯度流
+        # 特征融合
+        return x + self.norm2(x) # 特征增强
 
+class ViTProj(BaseProjector):
+    """视觉特征投影（ViT->LLM）"""
+    def __init__(self, n_vit_layer: int, n_vit_embd: int, n_llm_embd: int, hidden_dim: int = 1024):
+        super().__init__(
+            n_layers=n_vit_layer,
+            in_dim=n_vit_embd,
+            out_dim=n_llm_embd,
+            hidden_dim=hidden_dim,
+            reverse=False
+        )
 
-class ReViTProj(nn.Module):
-    def __init__(
-        self,
-        n_vit_layer: int,
-        n_llm_embd: int,
-        n_vit_embd: int,
-    ):
-        super().__init__()
-        self.n_vit_layer = n_vit_layer
-
-        # 主路径参数
-        self.w1 = nn.Parameter(torch.Tensor(n_vit_layer, n_llm_embd, n_vit_embd))
-        self.b1 = nn.Parameter(torch.Tensor(n_vit_layer, n_vit_embd))
-
-        nn.init.kaiming_normal_(self.w1, mode="fan_in", nonlinearity="linear")
-        nn.init.zeros_(self.b1)
-
-        # 标准化层调整分组数
-        self.gn1 = nn.GroupNorm(num_groups=n_vit_layer, num_channels=n_vit_layer)
-        self.act = nn.GELU()
-        self.drop = nn.Dropout(0.1)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """ 输入形状: (b, l, e_llm), 输出形状: (b, l, e_vit) """
-        x = self.gn1(x)
-        x = self.act(x)
-        x = torch.einsum("ble,leh->blh", x, self.w1) + self.b1.unsqueeze(0)
-        x = self.drop(x)
-        return x
+class ReViTProj(BaseProjector):
+    """逆向特征投影（LLM->ViT）"""
+    def __init__(self, n_vit_layer: int, n_llm_embd: int, n_vit_embd: int, hidden_dim: int = 1024):
+        super().__init__(
+            n_layers=n_vit_layer,
+            in_dim=n_llm_embd,
+            out_dim=n_vit_embd,
+            hidden_dim=hidden_dim,
+            reverse=True
+        )
 
 class EmbeddingAndIMGProj(nn.Embedding):
     def __init__(
